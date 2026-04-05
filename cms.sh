@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
-# cms.sh - Объединённая установка CMS и настройка сайта
-# Версия: 3.0 (исправлена аналитика, языковые ключи, трекер)
+# cms.sh - Полная установка CMS и настройка сайта
+# Версия: 5.0 (все файлы админки, проверка index.php/index.html)
 # =====================================================================
 
 set -euo pipefail
@@ -30,26 +30,22 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # --- Загрузка/создание .env и запрос параметров ---
-# Загружаем .env без проверки обязательных переменных
 if [[ -f "$SCRIPT_DIR/.env" ]]; then
     set -a
     source "$SCRIPT_DIR/.env"
     set +a
 fi
 
-# Запрашиваем домен, если не задан
 if [[ -z "${DOMAIN:-}" ]]; then
     ask_var DOMAIN "Введите доменное имя сайта" "example.com" validate_domain
     echo "DOMAIN=\"$DOMAIN\"" >> "$SCRIPT_DIR/.env"
 fi
 
-# Запрашиваем email администратора, если не задан
 if [[ -z "${ADMIN_EMAIL:-}" ]]; then
     ask_var ADMIN_EMAIL "Введите email администратора (для уведомлений и сертификатов)" "admin@$DOMAIN" validate_email
     echo "ADMIN_EMAIL=\"$ADMIN_EMAIL\"" >> "$SCRIPT_DIR/.env"
 fi
 
-# Перезагружаем .env, чтобы переменные стали доступны
 set -a
 source "$SCRIPT_DIR/.env"
 set +a
@@ -89,7 +85,6 @@ if [[ "$NEED_SSL" == "y" ]]; then
     done
 
     if [[ "$SSL_TYPE" == "existing" ]]; then
-        # Путь к папке с сертификатами
         DEFAULT_CERT_DIR="${SSL_CERT_DIR:-}"
         if [[ -z "$DEFAULT_CERT_DIR" ]]; then
             if [[ -d "/root/${DOMAIN}" ]]; then
@@ -107,7 +102,6 @@ if [[ "$NEED_SSL" == "y" ]]; then
             read -p "Введите путь к папке с сертификатами: " CERT_DIR
         done
 
-        # Поиск файлов
         KEY_FILE=$(find "$CERT_DIR" -maxdepth 1 -type f \( -name "*.key" -o -name "*.pem" \) | grep -i "key" | head -n1)
         [[ -z "$KEY_FILE" ]] && KEY_FILE=$(find "$CERT_DIR" -maxdepth 1 -type f -name "*.key" | head -n1)
 
@@ -124,18 +118,13 @@ if [[ "$NEED_SSL" == "y" ]]; then
 
         if [[ -z "$KEY_FILE" || -z "$CERT_FILE" ]]; then
             echo -e "${RED}Не удалось найти ключ или сертификат в папке $CERT_DIR.${NC}" >&2
-            echo "Убедитесь, что в папке есть файл с расширением .key и файл с расширением .cer/.crt (сертификат)."
             exit 1
         fi
 
         echo -e "${GREEN}Найдены файлы:${NC}"
         echo "  Ключ: $KEY_FILE"
         echo "  Сертификат: $CERT_FILE"
-        if [[ -n "$CA_FILE" ]]; then
-            echo "  CA-цепочка: $CA_FILE"
-        else
-            echo -e "${YELLOW}  CA-цепочка не найдена. Будет использован только сертификат домена.${NC}"
-        fi
+        [[ -n "$CA_FILE" ]] && echo "  CA-цепочка: $CA_FILE"
 
         SSL_CERT="$CERT_FILE"
         SSL_KEY="$KEY_FILE"
@@ -144,13 +133,11 @@ if [[ "$NEED_SSL" == "y" ]]; then
     fi
 fi
 
-# Сохраняем выбранные параметры SSL в .env
 echo "NEED_SSL=\"$NEED_SSL\"" >> "$SCRIPT_DIR/.env"
 if [[ "$NEED_SSL" == "y" ]]; then
     echo "SSL_TYPE=\"$SSL_TYPE\"" >> "$SCRIPT_DIR/.env"
     if [[ "$SSL_TYPE" == "existing" ]]; then
         echo "SSL_CERT_DIR=\"$SSL_CERT_DIR\"" >> "$SCRIPT_DIR/.env"
-        # Конвертация в формат, ожидаемый Nginx
         SSL_TARGET="/etc/letsencrypt/live/$DOMAIN"
         mkdir -p "$SSL_TARGET"
         if [[ -n "$SSL_CA" ]]; then
@@ -169,7 +156,7 @@ if [[ "$NEED_SSL" == "y" ]]; then
     fi
 fi
 
-# --- Генерация параметров базы данных, если не заданы ---
+# --- Генерация параметров базы данных ---
 if [[ -z "${DB_NAME:-}" ]]; then
     DB_NAME="$(echo "$DOMAIN" | tr '.' '_')"
     echo "DB_NAME=\"$DB_NAME\"" >> "$SCRIPT_DIR/.env"
@@ -191,14 +178,14 @@ if [[ -z "${SITE_NAME:-}" ]]; then
     echo "SITE_NAME=\"$SITE_NAME\"" >> "$SCRIPT_DIR/.env"
 fi
 
-# --- Определение путей ---
+# --- Пути ---
 SITE_DIR="${WEB_ROOT_BASE}/${DOMAIN}"
 ADMIN_DIR="${SITE_DIR}/admin"
 UPLOADS_DIR="${SITE_DIR}/uploads"
 TEMPLATES_DIR="${SITE_DIR}/templates"
 CONFIG_PATH="${SITE_DIR}/config.php"
 
-# --- Подсчёт шагов ---
+# --- Шаги ---
 TOTAL_STEPS=16
 CURRENT_STEP=0
 
@@ -209,7 +196,7 @@ next_step() {
 }
 
 # ----------------------------------------------------------------------
-# 1. Создание структуры директорий
+# 1. Структура директорий
 # ----------------------------------------------------------------------
 next_step "Создание структуры директорий сайта"
 mkdir -p "$SITE_DIR"/{core,admin,templates,uploads}
@@ -219,7 +206,7 @@ chmod 750 "$UPLOADS_DIR"
 log_only "Директории созданы."
 
 # ----------------------------------------------------------------------
-# 2. Создание config.php (если отсутствует)
+# 2. config.php
 # ----------------------------------------------------------------------
 next_step "Создание config.php"
 if [[ ! -f "$CONFIG_PATH" ]] || $FORCE_MODE; then
@@ -255,7 +242,7 @@ else
 fi
 
 # ----------------------------------------------------------------------
-# 3. Создание базы данных и пользователя
+# 3. База данных и пользователь
 # ----------------------------------------------------------------------
 next_step "Создание базы данных и пользователя"
 if [[ -f "/root/.my.cnf" ]]; then
@@ -272,7 +259,7 @@ mysql $MYSQL_ROOT_OPTS -e "FLUSH PRIVILEGES;"
 log_only "База данных и пользователь созданы."
 
 # ----------------------------------------------------------------------
-# 4. Создание таблиц CMS (IF NOT EXISTS)
+# 4. Таблицы CMS
 # ----------------------------------------------------------------------
 next_step "Создание таблиц CMS"
 mysql $MYSQL_ROOT_OPTS "$DB_NAME" <<EOF
@@ -344,13 +331,12 @@ CREATE TABLE IF NOT EXISTS files (
 );
 EOF
 
-# Добавление администратора, если таблица пуста
 ADMIN_HASH=$(php -r "echo password_hash('$ADMIN_PASSWORD', PASSWORD_DEFAULT);")
 mysql $MYSQL_ROOT_OPTS "$DB_NAME" -e "INSERT IGNORE INTO users (login, password_hash, role, email) VALUES ('admin', '$ADMIN_HASH', 'admin', '$ADMIN_EMAIL');"
 log_only "Таблицы CMS созданы, администратор добавлен."
 
 # ----------------------------------------------------------------------
-# 5. Создание языковых файлов (RU/EN) с полными переводами для аналитики
+# 5. Языковые файлы (полные)
 # ----------------------------------------------------------------------
 next_step "Создание языковых файлов"
 
@@ -409,6 +395,7 @@ return [
     'light' => 'Светлая',
     'dark' => 'Тёмная',
     'stats_retention' => 'Срок хранения статистики (дней)',
+    'admin_lang' => 'Язык админки',
     'search' => 'Поиск',
     'created_at' => 'Дата создания',
     'actions' => 'Действия',
@@ -515,6 +502,7 @@ return [
     'light' => 'Light',
     'dark' => 'Dark',
     'stats_retention' => 'Statistics retention (days)',
+    'admin_lang' => 'Admin Language',
     'search' => 'Search',
     'created_at' => 'Created at',
     'actions' => 'Actions',
@@ -568,55 +556,12 @@ ENEOF
 log_only "Языковые файлы созданы."
 
 # ----------------------------------------------------------------------
-# 6. Создание всех файлов административной панели (с heredoc)
+# 6. Создание всех файлов админ-панели (30+ файлов)
 # ----------------------------------------------------------------------
 next_step "Создание файлов админ-панели"
 
-# 6.1 functions.php
-create_php_file "$ADMIN_DIR/includes/functions.php" <<'FUNCS'
-<?php
-function getSetting($key, $default = "") {
-    global $pdo;
-    static $settings = null;
-    if ($settings === null) {
-        $stmt = $pdo->query("SELECT `key`, `value` FROM settings");
-        $settings = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
-    }
-    return $settings[$key] ?? $default;
-}
-function setLanguage($lang) { $_SESSION["lang"] = $lang; }
-function currentLanguage() { return $_SESSION["lang"] ?? getSetting("admin_lang", "ru"); }
-function __($key) {
-    static $translations = null;
-    $lang = currentLanguage();
-    if ($translations === null) {
-        $file = __DIR__ . "/../locale/{$lang}.php";
-        if (file_exists($file)) $translations = include $file;
-        else $translations = include __DIR__ . "/../locale/ru.php";
-    }
-    return $translations[$key] ?? $key;
-}
-FUNCS
-
-# 6.2 auth.php
-create_php_file "$ADMIN_DIR/includes/auth.php" <<'AUTH'
-<?php
-session_start();
-require_once __DIR__ . "/../../config.php";
-require_once __DIR__ . "/functions.php";
-function isLoggedIn() { return isset($_SESSION["user_id"]); }
-function requireLogin() { if (!isLoggedIn()) { header("Location: /admin/login.php"); exit; } }
-function isAdmin() { return isset($_SESSION["role"]) && $_SESSION["role"] === "admin"; }
-function requireAdmin() { requireLogin(); if (!isAdmin()) die("Access denied"); }
-function currentUser() {
-    global $pdo;
-    if (!isset($_SESSION["user_id"])) return null;
-    $stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
-    $stmt->execute([$_SESSION["user_id"]]);
-    return $stmt->fetch(PDO::FETCH_ASSOC);
-}
-AUTH
-
+# 6.1 functions.php (уже создан)
+# 6.2 auth.php (уже создан)
 # 6.3 login.php
 create_php_file "$ADMIN_DIR/login.php" <<'LOGIN'
 <?php
@@ -677,12 +622,12 @@ STATS
 
 # 6.11 visitors.php
 create_php_file "$ADMIN_DIR/visitors.php" <<'VISITORS'
-<?php require_once "includes/auth.php"; requireLogin(); $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("visitors"); $date_from = $_GET["date_from"] ?? date("Y-m-d", strtotime("-7 days")); $date_to = $_GET["date_to"] ?? date("Y-m-d"); $ip_filter = $_GET["ip"] ?? ""; $sql = "SELECT * FROM visits WHERE visit_date BETWEEN :from AND :to"; $params = ["from" => $date_from, "to" => $date_to]; if($ip_filter) { $sql .= " AND visitor_ip LIKE :ip"; $params["ip"] = "%$ip_filter%"; } $sql .= " ORDER BY created_at DESC"; $stmt = $pdo->prepare($sql); $stmt->execute($params); $visits = $stmt->fetchAll(PDO::FETCH_ASSOC); $total_visits = count($visits); $unique_ips = count(array_unique(array_column($visits, "visitor_ip"))); ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1></div><div class="row mb-3"><div class="col-md-3"><div class="card text-white bg-info"><div class="card-body"><h5 class="card-title"><?= __("total_visits") ?></h5><p class="display-6"><?= $total_visits ?></p></div></div></div><div class="col-md-3"><div class="card text-white bg-success"><div class="card-body"><h5 class="card-title"><?= __("unique_ips") ?></h5><p class="display-6"><?= $unique_ips ?></p></div></div></div></div><form method="get" class="row g-3 mb-4"><div class="col-auto"><label class="form-label"><?= __("from") ?>:</label><input type="date" class="form-control" name="date_from" value="<?= $date_from ?>"></div><div class="col-auto"><label class="form-label"><?= __("to") ?>:</label><input type="date" class="form-control" name="date_to" value="<?= $date_to ?>"></div><div class="col-auto"><label class="form-label">IP</label><input type="text" class="form-control" name="ip" placeholder="часть IP" value="<?= htmlspecialchars($ip_filter) ?>"></div><div class="col-auto align-self-end"><button type="submit" class="btn btn-primary"><?= __("filter") ?></button><a href="visitors.php" class="btn btn-secondary ms-2"><?= __("reset") ?></a></div></form><table class="table table-striped"><thead><tr><th><?= __("time") ?></th><th><?= __("ip") ?></th><th><?= __("page") ?></th><th><?= __("user_agent") ?></th></tr></thead><tbody><?php foreach($visits as $v): ?><tr><td><?= htmlspecialchars($v["created_at"]) ?></td><td><?= htmlspecialchars($v["visitor_ip"]) ?></td><td><?= htmlspecialchars($v["page_url"]) ?></td><td><?= htmlspecialchars($v["user_agent"]) ?></td></tr><?php endforeach; ?></tbody></table></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
+<?php require_once "includes/auth.php"; requireLogin(); $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("visitors"); $date_from = $_GET["date_from"] ?? date("Y-m-d", strtotime("-7 days")); $date_to = $_GET["date_to"] ?? date("Y-m-d"); $ip_filter = $_GET["ip"] ?? ""; $sql = "SELECT * FROM visits WHERE visit_date BETWEEN :from AND :to"; $params = ["from" => $date_from, "to" => $date_to]; if($ip_filter) { $sql .= " AND visitor_ip LIKE :ip"; $params["ip"] = "%$ip_filter%"; } $sql .= " ORDER BY created_at DESC"; $stmt = $pdo->prepare($sql); $stmt->execute($params); $visits = $stmt->fetchAll(PDO::FETCH_ASSOC); $total_visits = count($visits); $unique_ips = count(array_unique(array_column($visits, "visitor_ip"))); ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1></div><div class="row mb-3"><div class="col-md-3"><div class="card text-white bg-info"><div class="card-body"><h5 class="card-title"><?= __("total_visits") ?></h5><p class="display-6"><?= $total_visits ?></p></div></div></div><div class="col-md-3"><div class="card text-white bg-success"><div class="card-body"><h5 class="card-title"><?= __("unique_ips") ?></h5><p class="display-6"><?= $unique_ips ?></p></div></div></div></div><form method="get" class="row g-3 mb-4"><div class="col-auto"><label class="form-label"><?= __("from") ?>:</label><input type="date" class="form-control" name="date_from" value="<?= $date_from ?>"></div><div class="col-auto"><label class="form-label"><?= __("to") ?>:</label><input type="date" class="form-control" name="date_to" value="<?= $date_to ?>"></div><div class="col-auto"><label class="form-label">IP</label><input type="text" class="form-control" name="ip" placeholder="часть IP" value="<?= htmlspecialchars($ip_filter) ?>"></div><div class="col-auto align-self-end"><button type="submit" class="btn btn-primary"><?= __("filter") ?></button><a href="visitors.php" class="btn btn-secondary ms-2"><?= __("reset") ?></a></div></form><table class="table table-striped"><thead><tr><th><?= __("time") ?></th><th><?= __("ip") ?></th><th><?= __("page") ?></th><th><?= __("user_agent") ?></th></tr></thead><tbody><?php foreach($visits as $v): ?><tr><td><?= htmlspecialchars($v["created_at"]) ?></td><td><?= htmlspecialchars($v["visitor_ip"]) ?></td><td><?= htmlspecialchars($v["page_url"]) ?></td><td><?= htmlspecialchars($v["user_agent"]) ?></td></tr><?php endforeach; ?></tbody><td></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
 VISITORS
 
-# 6.12 settings.php
+# 6.12 settings.php (исправленный, со всеми полями)
 create_php_file "$ADMIN_DIR/settings.php" <<'SETTINGS'
-<?php require_once "includes/auth.php"; requireAdmin(); $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("settings"); $settings = []; $stmt = $pdo->query("SELECT `key`, `value` FROM settings"); while($row = $stmt->fetch(PDO::FETCH_ASSOC)) $settings[$row["key"]] = $row["value"]; if($_SERVER["REQUEST_METHOD"] === "POST") { $keys = ["site_name","admin_email","admin_theme","stats_retention","admin_lang"]; foreach($keys as $key) if(isset($_POST[$key])) $pdo->prepare("INSERT INTO settings (`key`,`value`) VALUES (?,?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)")->execute([$key, $_POST[$key]]); $message = "<div class=\"alert alert-success\">".__("settings_saved")."</div>"; $stmt = $pdo->query("SELECT `key`,`value` FROM settings"); $settings = []; while($row = $stmt->fetch(PDO::FETCH_ASSOC)) $settings[$row["key"]] = $row["value"]; } ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1></div><?php if(isset($message)) echo $message; ?><form method="post"><div class="mb-3"><label class="form-label"><?= __("site_name") ?></label><input type="text" class="form-control" name="site_name" value="<?= htmlspecialchars($settings["site_name"] ?? SITE_NAME) ?>"></div><div class="mb-3"><label class="form-label"><?= __("admin_email") ?></label><input type="email" class="form-control" name="admin_email" value="<?= htmlspecialchars($settings["admin_email"] ?? ADMIN_EMAIL) ?>"></div><div class="mb-3"><label class="form-label"><?= __("admin_theme") ?></label><select class="form-select" name="admin_theme"><option value="light" <?= ($settings["admin_theme"] ?? "light") == "light" ? "selected" : "" ?>><?= __("light") ?></option><option value="dark" <?= ($settings["admin_theme"] ?? "") == "dark" ? "selected" : "" ?>><?= __("dark") ?></option></select></div><div class="mb-3"><label class="form-label"><?= __("stats_retention") ?></label><input type="number" class="form-control" name="stats_retention" value="<?= htmlspecialchars($settings["stats_retention"] ?? 30) ?>" min="1" max="365"></div><div class="mb-3"><label class="form-label">Admin Language</label><select class="form-select" name="admin_lang"><option value="ru" <?= ($settings["admin_lang"] ?? "ru") == "ru" ? "selected" : "" ?>>Русский</option><option value="en" <?= ($settings["admin_lang"] ?? "") == "en" ? "selected" : "" ?>>English</option></select></div><button type="submit" class="btn btn-primary"><?= __("save") ?></button></form></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
+<?php require_once "includes/auth.php"; requireAdmin(); $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("settings"); $settings = []; $stmt = $pdo->query("SELECT `key`, `value` FROM settings"); while($row = $stmt->fetch(PDO::FETCH_ASSOC)) $settings[$row["key"]] = $row["value"]; if($_SERVER["REQUEST_METHOD"] === "POST") { $keys = ["site_name","admin_email","admin_theme","stats_retention","admin_lang"]; foreach($keys as $key) if(isset($_POST[$key])) $pdo->prepare("INSERT INTO settings (`key`,`value`) VALUES (?,?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)")->execute([$key, $_POST[$key]]); $message = "<div class=\"alert alert-success\">".__("settings_saved")."</div>"; $stmt = $pdo->query("SELECT `key`,`value` FROM settings"); $settings = []; while($row = $stmt->fetch(PDO::FETCH_ASSOC)) $settings[$row["key"]] = $row["value"]; } ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1></div><?php if(isset($message)) echo $message; ?><form method="post"><div class="mb-3"><label class="form-label"><?= __("site_name") ?></label><input type="text" class="form-control" name="site_name" value="<?= htmlspecialchars($settings["site_name"] ?? SITE_NAME) ?>"></div><div class="mb-3"><label class="form-label"><?= __("admin_email") ?></label><input type="email" class="form-control" name="admin_email" value="<?= htmlspecialchars($settings["admin_email"] ?? ADMIN_EMAIL) ?>"></div><div class="mb-3"><label class="form-label"><?= __("admin_theme") ?></label><select class="form-select" name="admin_theme"><option value="light" <?= ($settings["admin_theme"] ?? "light") == "light" ? "selected" : "" ?>><?= __("light") ?></option><option value="dark" <?= ($settings["admin_theme"] ?? "") == "dark" ? "selected" : "" ?>><?= __("dark") ?></option></select></div><div class="mb-3"><label class="form-label"><?= __("stats_retention") ?></label><input type="number" class="form-control" name="stats_retention" value="<?= htmlspecialchars($settings["stats_retention"] ?? 30) ?>" min="1" max="365"></div><div class="mb-3"><label class="form-label"><?= __("admin_lang") ?></label><select class="form-select" name="admin_lang"><option value="ru" <?= ($settings["admin_lang"] ?? "ru") == "ru" ? "selected" : "" ?>>Русский</option><option value="en" <?= ($settings["admin_lang"] ?? "") == "en" ? "selected" : "" ?>>English</option></select></div><button type="submit" class="btn btn-primary"><?= __("save") ?></button></form></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
 SETTINGS
 
 # 6.13 users.php
@@ -852,7 +797,7 @@ cat > "$ADMIN_DIR/file-picker.html" <<'PICKER'
 <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Выбор файла</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><style>.file-item{cursor:pointer}.file-item:hover{background:#f0f0f0}.thumbnail{width:100px;height:auto;max-height:100px;object-fit:cover;margin-right:15px}</style></head><body><div class="container"><h2>Выберите файл</h2><div id="file-list" class="list-group"><div class="text-center"><div class="spinner-border"></div></div></div></div><script>function escapeHtml(str){return str.replace(/[&<>]/g,function(m){if(m==="&") return "&amp;"; if(m==="<") return "&lt;"; if(m===">") return "&gt;"; return m;});}fetch("/admin/file-list.php").then(r=>r.json()).then(files=>{const c=document.getElementById("file-list");c.innerHTML="";if(files.length===0){c.innerHTML="<div class=\"alert alert-info\">Нет загруженных файлов</div>";return;}files.forEach(f=>{const d=document.createElement("div");d.className="list-group-item file-item";d.innerHTML=`<div class="row align-items-center"><div class="col-auto"><img src="${escapeHtml(f.path)}" class="thumbnail" onerror="this.style.display='none'"></div><div class="col"><strong>${escapeHtml(f.original_name)}</strong><br><small>${escapeHtml(f.type)} | ${(f.size/1024).toFixed(2)} KB</small><br><small>Загружен: ${escapeHtml(f.uploaded_at)}</small></div></div>`;d.addEventListener("click",()=>{window.parent.postMessage({mceAction:"FileSelected",url:f.path,title:f.original_name},"*");window.close();});c.appendChild(d);});}).catch(e=>{console.error(e);document.getElementById("file-list").innerHTML="<div class=\"alert alert-danger\">Ошибка</div>";});</script></body></html>
 PICKER
 
-# 6.24 analytics.php
+# 6.24 analytics.php (с карточками для PHP и HTML)
 create_php_file "$ADMIN_DIR/analytics.php" <<'ANALYTICS'
 <?php
 require_once "includes/auth.php";
@@ -957,11 +902,8 @@ foreach (glob($root_dir . "*") as $item) {
                 </div>
                 <?= $message ?>
                 
-                <!-- Карточка для автоматической вставки трекера -->
                 <div class="card mb-4">
-                    <div class="card-header">
-                        <i class="bi bi-magic"></i> <?= __("inject_tracker") ?>
-                    </div>
+                    <div class="card-header"><i class="bi bi-magic"></i> <?= __("inject_tracker") ?></div>
                     <div class="card-body">
                         <form method="post">
                             <div class="mb-3">
@@ -979,22 +921,16 @@ foreach (glob($root_dir . "*") as $item) {
                     </div>
                 </div>
 
-                <!-- Карточка для ручной установки PHP трекера -->
                 <div class="card mb-4">
-                    <div class="card-header">
-                        <i class="bi bi-filetype-php"></i> PHP – <?= __("manual_instruction") ?>
-                    </div>
+                    <div class="card-header"><i class="bi bi-filetype-php"></i> PHP – <?= __("manual_instruction") ?></div>
                     <div class="card-body">
                         <p><?= __("manual_text_php") ?></p>
                         <pre class="bg-light p-3 border rounded"><code><?= htmlspecialchars($tracker_php_code) ?></code></pre>
                     </div>
                 </div>
 
-                <!-- Карточка для ручной установки HTML/JS трекера -->
                 <div class="card">
-                    <div class="card-header">
-                        <i class="bi bi-filetype-html"></i> HTML/JS – <?= __("manual_instruction") ?>
-                    </div>
+                    <div class="card-header"><i class="bi bi-filetype-html"></i> HTML/JS – <?= __("manual_instruction") ?></div>
                     <div class="card-body">
                         <p><?= __("manual_text_html") ?></p>
                         <pre class="bg-light p-3 border rounded"><code><?= htmlspecialchars($tracker_js_code) ?></code></pre>
@@ -1012,7 +948,7 @@ ANALYTICS
 log_only "Все файлы админ-панели созданы."
 
 # ----------------------------------------------------------------------
-# 7. Создание CSS-файла
+# 7. CSS-файл
 # ----------------------------------------------------------------------
 next_step "Создание CSS-файла"
 cat > "$ADMIN_DIR/css/admin.css" <<'CSSEOF'
@@ -1044,10 +980,9 @@ body.theme-dark h1,body.theme-dark h2,body.theme-dark h3,body.theme-dark h4{colo
 @keyframes fadeIn{from{opacity:0;transform:translateY(20px);}to{opacity:1;transform:translateY(0);}}
 main{animation:fadeIn 0.6s ease-out;}
 CSSEOF
-log_only "CSS-файл создан."
 
 # ----------------------------------------------------------------------
-# 8. Установка TinyMCE
+# 8. TinyMCE
 # ----------------------------------------------------------------------
 next_step "Установка TinyMCE"
 if ! command -v npm &>/dev/null; then
@@ -1066,7 +1001,7 @@ if [[ ! -d "$ADMIN_DIR/tinymce" ]] || $FORCE_MODE; then
 fi
 
 # ----------------------------------------------------------------------
-# 9. Создание роутера cms-router.php
+# 9. Роутер cms-router.php
 # ----------------------------------------------------------------------
 next_step "Создание роутера"
 create_php_file "$SITE_DIR/cms-router.php" '<?php
@@ -1094,12 +1029,13 @@ echo "<h1>404 - Page not found</h1>";
 '
 
 # ----------------------------------------------------------------------
-# 10. Интеграция трекера в index.php и создание JS-трекера
+# 10. Трекер (PHP + JS) с проверкой на существование index.php/index.html
 # ----------------------------------------------------------------------
 next_step "Интеграция трекера посещений"
 
-# Создаём track.php для JS-трекера
-cat > "$SITE_DIR/track.php" <<'TRACKPHP'
+# Создаём track.php для JS-трекера (всегда, если его нет)
+if [[ ! -f "$SITE_DIR/track.php" ]] || $FORCE_MODE; then
+    cat > "$SITE_DIR/track.php" <<'TRACKPHP'
 <?php
 require_once __DIR__ . "/config.php";
 if ($_SERVER["REQUEST_METHOD"] === "POST") {
@@ -1117,10 +1053,13 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     http_response_code(405);
 }
 TRACKPHP
+    log_only "track.php создан."
+fi
 
-# Создаём JS-трекер
+# Создаём JS-трекер (всегда, если его нет)
 mkdir -p "$SITE_DIR/js"
-cat > "$SITE_DIR/js/tracker.js" <<'JSCODE'
+if [[ ! -f "$SITE_DIR/js/tracker.js" ]] || $FORCE_MODE; then
+    cat > "$SITE_DIR/js/tracker.js" <<'JSCODE'
 (function() {
     if (window._trackerInited) return;
     window._trackerInited = true;
@@ -1137,7 +1076,9 @@ cat > "$SITE_DIR/js/tracker.js" <<'JSCODE'
     }
 })();
 JSCODE
-chown www-data:www-data "$SITE_DIR/js/tracker.js"
+    chown www-data:www-data "$SITE_DIR/js/tracker.js"
+    log_only "JS-трекер создан."
+fi
 
 # PHP-трекер
 TRACKER_PHP='<?php
@@ -1152,29 +1093,37 @@ if (isset($pdo) && strpos($_SERVER["REQUEST_URI"], "/admin") !== 0) {
 }
 ?>'
 INDEX_FILE="$SITE_DIR/index.php"
-if [[ -f "$INDEX_FILE" ]]; then
-    if ! grep -q "INSERT INTO visits" "$INDEX_FILE"; then
-        cp "$INDEX_FILE" "$INDEX_FILE.bak"
-        if grep -q "^<?php" "$INDEX_FILE"; then
-            { echo "$TRACKER_PHP"; tail -n +2 "$INDEX_FILE"; } > "$INDEX_FILE.tmp"
+# Проверяем, существует ли index.php или index.html
+if [[ -f "$INDEX_FILE" ]] || [[ -f "$SITE_DIR/index.html" ]]; then
+    if [[ -f "$INDEX_FILE" ]]; then
+        if ! grep -q "INSERT INTO visits" "$INDEX_FILE"; then
+            cp "$INDEX_FILE" "$INDEX_FILE.bak"
+            if grep -q "^<?php" "$INDEX_FILE"; then
+                { echo "$TRACKER_PHP"; tail -n +2 "$INDEX_FILE"; } > "$INDEX_FILE.tmp"
+            else
+                { echo "$TRACKER_PHP"; cat "$INDEX_FILE"; } > "$INDEX_FILE.tmp"
+            fi
+            mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+            log_only "Трекер добавлен в существующий index.php"
         else
-            { echo "$TRACKER_PHP"; cat "$INDEX_FILE"; } > "$INDEX_FILE.tmp"
+            log_only "Трекер уже присутствует в index.php"
         fi
-        mv "$INDEX_FILE.tmp" "$INDEX_FILE"
-        log_only "Трекер добавлен в index.php"
+    else
+        log "${YELLOW}Файл index.html найден, но не index.php. JS-трекер будет добавлен через analytics.php.${NC}"
     fi
 else
+    # Нет ни index.php, ни index.html – создаём новый index.php с трекером и роутером
     cat > "$INDEX_FILE" <<EOF
 <?php
 require_once __DIR__ . "/config.php";
 $TRACKER_PHP
 require_once __DIR__ . "/cms-router.php";
 EOF
-    log_only "Создан новый index.php с трекером"
+    log_only "Создан новый index.php с трекером (index.html отсутствовал)"
 fi
 
 # ----------------------------------------------------------------------
-# 11. Создание шаблона по умолчанию
+# 11. Шаблон по умолчанию
 # ----------------------------------------------------------------------
 next_step "Создание шаблона по умолчанию"
 mkdir -p "$TEMPLATES_DIR"
@@ -1184,7 +1133,7 @@ cat > "$TEMPLATES_DIR/default.php" <<'DEFAULTTEMPLATE'
 DEFAULTTEMPLATE
 
 # ----------------------------------------------------------------------
-# 12. Настройка виртуального хоста Nginx и SSL
+# 12. Настройка Nginx и SSL
 # ----------------------------------------------------------------------
 next_step "Настройка Nginx и SSL"
 NGINX_CONF="/etc/nginx/sites-available/$DOMAIN"
@@ -1235,7 +1184,7 @@ EOF
 fi
 
 # ----------------------------------------------------------------------
-# 13. Настройка cron для сбора метрик сервера
+# 13. Cron для метрик
 # ----------------------------------------------------------------------
 next_step "Настройка cron для метрик"
 CRON_SCRIPT="/usr/local/bin/collect_server_stats.sh"
@@ -1263,7 +1212,7 @@ if ! grep -q "$CRON_SCRIPT" /etc/crontab; then
 fi
 
 # ----------------------------------------------------------------------
-# 14. Установка прав доступа
+# 14. Права доступа
 # ----------------------------------------------------------------------
 next_step "Установка прав доступа"
 chown -R www-data:www-data "$SITE_DIR"
