@@ -31,19 +31,29 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # --- Загрузка/создание .env и запрос параметров ---
-load_env "DOMAIN" "ADMIN_EMAIL" 2>/dev/null || true
+# Загружаем .env без проверки обязательных переменных
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+    set -a
+    source "$SCRIPT_DIR/.env"
+    set +a
+fi
 
-# Запрашиваем домен
+# Запрашиваем домен, если не задан
 if [[ -z "${DOMAIN:-}" ]]; then
     ask_var DOMAIN "Введите доменное имя сайта" "example.com" validate_domain
     echo "DOMAIN=\"$DOMAIN\"" >> "$SCRIPT_DIR/.env"
 fi
 
-# Запрашиваем email администратора
+# Запрашиваем email, если не задан
 if [[ -z "${ADMIN_EMAIL:-}" ]]; then
     ask_var ADMIN_EMAIL "Введите email администратора (для уведомлений и сертификатов)" "admin@$DOMAIN" validate_email
     echo "ADMIN_EMAIL=\"$ADMIN_EMAIL\"" >> "$SCRIPT_DIR/.env"
 fi
+
+# Перезагружаем .env, чтобы переменные стали доступны
+set -a
+source "$SCRIPT_DIR/.env"
+set +a
 
 # --- Выбор типа SSL-сертификата ---
 if [[ -z "${SSL_TYPE:-}" ]]; then
