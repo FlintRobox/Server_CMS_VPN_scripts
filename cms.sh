@@ -1,8 +1,7 @@
 #!/bin/bash
 # =====================================================================
-# cms.sh - Объединённая установка CMS и настройка сайта (полная версия)
-# Версия: 3.0
-# Выполняет полную настройку веб-сервера, SSL, БД и установку CMS.
+# cms.sh - Объединённая установка CMS и настройка сайта
+# Версия: 3.0 (исправлена аналитика, языковые ключи, трекер)
 # =====================================================================
 
 set -euo pipefail
@@ -55,7 +54,7 @@ set -a
 source "$SCRIPT_DIR/.env"
 set +a
 
-# --- Запрос необходимости SSL и типа сертификата ---
+# --- Выбор SSL (старая добрая логика) ---
 DEFAULT_NEED_SSL="${NEED_SSL:-y}"
 while true; do
     read -p "Требуется ли SSL-сертификат? (y/n) [$DEFAULT_NEED_SSL]: " ssl_answer
@@ -199,8 +198,8 @@ UPLOADS_DIR="${SITE_DIR}/uploads"
 TEMPLATES_DIR="${SITE_DIR}/templates"
 CONFIG_PATH="${SITE_DIR}/config.php"
 
-# --- Подсчёт шагов (динамический) ---
-TOTAL_STEPS=14
+# --- Подсчёт шагов ---
+TOTAL_STEPS=16
 CURRENT_STEP=0
 
 next_step() {
@@ -351,7 +350,7 @@ mysql $MYSQL_ROOT_OPTS "$DB_NAME" -e "INSERT IGNORE INTO users (login, password_
 log_only "Таблицы CMS созданы, администратор добавлен."
 
 # ----------------------------------------------------------------------
-# 5. Создание языковых файлов (RU/EN) – полные версии
+# 5. Создание языковых файлов (RU/EN) с полными переводами для аналитики
 # ----------------------------------------------------------------------
 next_step "Создание языковых файлов"
 
@@ -454,6 +453,8 @@ return [
     'select_files' => 'Выберите файлы для внедрения трекера',
     'tracker_added' => 'Трекер успешно добавлен в выбранные файлы',
     'tracker_removed' => 'Трекер удалён из выбранных файлов',
+    'manual_instruction' => 'Ручная установка',
+    'manual_text' => 'Если автоматическая вставка не сработала, добавьте вручную перед закрывающим тегом &lt;/body&gt; следующий код:',
 ];
 RUEOF
 
@@ -556,6 +557,8 @@ return [
     'select_files' => 'Select files to inject tracker',
     'tracker_added' => 'Tracker successfully added to selected files',
     'tracker_removed' => 'Tracker removed from selected files',
+    'manual_instruction' => 'Manual installation',
+    'manual_text' => 'If automatic insertion failed, manually add the following code before the closing &lt;/body&gt; tag:',
 ];
 ENEOF
 log_only "Языковые файлы созданы."
@@ -845,10 +848,135 @@ cat > "$ADMIN_DIR/file-picker.html" <<'PICKER'
 <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Выбор файла</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><style>.file-item{cursor:pointer}.file-item:hover{background:#f0f0f0}.thumbnail{width:100px;height:auto;max-height:100px;object-fit:cover;margin-right:15px}</style></head><body><div class="container"><h2>Выберите файл</h2><div id="file-list" class="list-group"><div class="text-center"><div class="spinner-border"></div></div></div></div><script>function escapeHtml(str){return str.replace(/[&<>]/g,function(m){if(m==="&") return "&amp;"; if(m==="<") return "&lt;"; if(m===">") return "&gt;"; return m;});}fetch("/admin/file-list.php").then(r=>r.json()).then(files=>{const c=document.getElementById("file-list");c.innerHTML="";if(files.length===0){c.innerHTML="<div class=\"alert alert-info\">Нет загруженных файлов</div>";return;}files.forEach(f=>{const d=document.createElement("div");d.className="list-group-item file-item";d.innerHTML=`<div class="row align-items-center"><div class="col-auto"><img src="${escapeHtml(f.path)}" class="thumbnail" onerror="this.style.display='none'"></div><div class="col"><strong>${escapeHtml(f.original_name)}</strong><br><small>${escapeHtml(f.type)} | ${(f.size/1024).toFixed(2)} KB</small><br><small>Загружен: ${escapeHtml(f.uploaded_at)}</small></div></div>`;d.addEventListener("click",()=>{window.parent.postMessage({mceAction:"FileSelected",url:f.path,title:f.original_name},"*");window.close();});c.appendChild(d);});}).catch(e=>{console.error(e);document.getElementById("file-list").innerHTML="<div class=\"alert alert-danger\">Ошибка</div>";});</script></body></html>
 PICKER
 
-# 6.24 analytics.php
+# 6.24 analytics.php (исправленная версия)
 create_php_file "$ADMIN_DIR/analytics.php" <<'ANALYTICS'
-<?php require_once "includes/auth.php"; requireLogin(); $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("analytics"); $message = ""; $root_dir = __DIR__ . "/../"; $tracker_js_code = "<script src=\"/js/tracker.js\"></script>"; $tracker_php_code = "<?php\nif (isset(\$pdo) && strpos(\$_SERVER[\"REQUEST_URI\"], \"/admin\") !== 0) {\n    try {\n        \$ip = \$_SERVER[\"REMOTE_ADDR\"] ?? \"\";\n        \$ua = \$_SERVER[\"HTTP_USER_AGENT\"] ?? \"\";\n        \$url = \$_SERVER[\"REQUEST_URI\"] ?? \"\";\n        \$stmt = \$pdo->prepare(\"INSERT INTO visits (visit_date, visitor_ip, user_agent, page_url) VALUES (CURDATE(), ?, ?, ?)\");\n        \$stmt->execute([\$ip, \$ua, \$url]);\n    } catch (Exception \$e) {}\n}\n?>"; if($_SERVER["REQUEST_METHOD"] === "POST") { $action = $_POST["action"] ?? ""; $files = $_POST["files"] ?? []; if($action === "inject") { foreach($files as $file) { $file_path = $root_dir . $file; if(!file_exists($file_path)) continue; $ext = pathinfo($file, PATHINFO_EXTENSION); $backup = $file_path . ".bak." . date("Ymd_His"); copy($file_path, $backup); $content = file_get_contents($file_path); if(in_array($ext, ["php","phtml","inc"])) { if(strpos($content, "INSERT INTO visits") === false) { if(preg_match("/^<\?php/", $content)) $new_content = preg_replace("/^<\?php/", "<?php\n$tracker_php_code", $content); else $new_content = $tracker_php_code . "\n" . $content; file_put_contents($file_path, $new_content); } } elseif(in_array($ext, ["html","htm"])) { if(strpos($content, "tracker.js") === false) { $new_content = str_replace("</body>", "$tracker_js_code\n</body>", $content); file_put_contents($file_path, $new_content); } } } $message = "<div class=\"alert alert-success\">".__("tracker_added")."</div>"; } elseif($action === "remove") { foreach($files as $file) { $file_path = $root_dir . $file; if(!file_exists($file_path)) continue; $ext = pathinfo($file, PATHINFO_EXTENSION); $content = file_get_contents($file_path); if(in_array($ext, ["php","phtml","inc"])) { $new_content = preg_replace("/<\?php\nif \(isset\(\$pdo\).*?}\n\?>/s", "", $content); if($new_content !== $content) file_put_contents($file_path, $new_content); } elseif(in_array($ext, ["html","htm"])) { $new_content = str_replace($tracker_js_code, "", $content); if($new_content !== $content) file_put_contents($file_path, $new_content); } } $message = "<div class=\"alert alert-success\">".__("tracker_removed")."</div>"; } } $files_list = []; $excluded = ["admin","uploads","core","templates","tinymce","js","css"]; foreach(glob($root_dir . "*") as $item) { $basename = basename($item); if(is_file($item) && !in_array($basename, $excluded) && in_array(pathinfo($item, PATHINFO_EXTENSION), ["php","html","htm","phtml","inc"])) { $files_list[] = $basename; } } ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1></div><?= $message ?><form method="post"><div class="mb-3"><label class="form-label"><?= __("select_files") ?></label><select class="form-select" name="files[]" multiple size="10"><?php foreach($files_list as $f): ?><option value="<?= htmlspecialchars($f) ?>"><?= htmlspecialchars($f) ?></option><?php endforeach; ?></select><div class="form-text">Удерживайте Ctrl для выбора нескольких файлов.</div></div><button type="submit" name="action" value="inject" class="btn btn-primary"><i class="bi bi-code-slash"></i> <?= __("inject_tracker") ?></button><button type="submit" name="action" value="remove" class="btn btn-danger ms-2"><i class="bi bi-trash"></i> <?= __("remove_tracker") ?></button></form><hr><h4><?= __("manual_instruction") ?></h4><p><?= __("manual_text") ?></p><pre class="bg-light p-3">PHP: <?= htmlspecialchars($tracker_php_code) ?>\nHTML: <?= htmlspecialchars($tracker_js_code) ?></pre></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
+<?php
+require_once "includes/auth.php";
+requireLogin();
+$site_name = getSetting("site_name", SITE_NAME);
+$pageTitle = __("analytics");
+$message = "";
+$root_dir = __DIR__ . "/../";
+$tracker_js_code = '<script src="/js/tracker.js"></script>';
+$tracker_php_code = '<?php
+if (isset($pdo) && strpos($_SERVER["REQUEST_URI"], "/admin") !== 0) {
+    try {
+        $ip = $_SERVER["REMOTE_ADDR"] ?? "";
+        $ua = $_SERVER["HTTP_USER_AGENT"] ?? "";
+        $url = $_SERVER["REQUEST_URI"] ?? "";
+        $stmt = $pdo->prepare("INSERT INTO visits (visit_date, visitor_ip, user_agent, page_url) VALUES (CURDATE(), ?, ?, ?)");
+        $stmt->execute([$ip, $ua, $url]);
+    } catch (Exception $e) {}
+}
+?>';
+
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+    $action = $_POST["action"] ?? "";
+    $files = $_POST["files"] ?? [];
+    if ($action === "inject") {
+        foreach ($files as $file) {
+            $file_path = $root_dir . $file;
+            if (!file_exists($file_path)) continue;
+            $ext = pathinfo($file, PATHINFO_EXTENSION);
+            $backup = $file_path . ".bak." . date("Ymd_His");
+            copy($file_path, $backup);
+            $content = file_get_contents($file_path);
+            if (in_array($ext, ["php", "phtml", "inc"])) {
+                if (strpos($content, "INSERT INTO visits") === false) {
+                    if (preg_match("/^<\?php/", $content)) {
+                        $new_content = preg_replace("/^<\?php/", "<?php\n" . $tracker_php_code, $content);
+                    } else {
+                        $new_content = $tracker_php_code . "\n" . $content;
+                    }
+                    file_put_contents($file_path, $new_content);
+                }
+            } elseif (in_array($ext, ["html", "htm"])) {
+                if (strpos($content, "tracker.js") === false) {
+                    if (preg_match("/<\/body\s*>/i", $content, $matches, PREG_OFFSET_CAPTURE)) {
+                        $pos = $matches[0][1];
+                        $new_content = substr_replace($content, $tracker_js_code . "\n" . $matches[0][0], $pos, strlen($matches[0][0]));
+                    } elseif (preg_match("/<\/html\s*>/i", $content, $matches, PREG_OFFSET_CAPTURE)) {
+                        $pos = $matches[0][1];
+                        $new_content = substr_replace($content, $tracker_js_code . "\n" . $matches[0][0], $pos, strlen($matches[0][0]));
+                    } else {
+                        $new_content = $content . "\n" . $tracker_js_code;
+                    }
+                    file_put_contents($file_path, $new_content);
+                }
+            }
+        }
+        $message = "<div class=\"alert alert-success\">" . __("tracker_added") . "</div>";
+    } elseif ($action === "remove") {
+        foreach ($files as $file) {
+            $file_path = $root_dir . $file;
+            if (!file_exists($file_path)) continue;
+            $ext = pathinfo($file, PATHINFO_EXTENSION);
+            $content = file_get_contents($file_path);
+            if (in_array($ext, ["php", "phtml", "inc"])) {
+                $new_content = preg_replace("/<\?php\nif \(isset\(\$pdo\).*?}\n\?>/s", "", $content);
+                if ($new_content !== $content) file_put_contents($file_path, $new_content);
+            } elseif (in_array($ext, ["html", "htm"])) {
+                $new_content = str_replace($tracker_js_code, "", $content);
+                if ($new_content !== $content) file_put_contents($file_path, $new_content);
+            }
+        }
+        $message = "<div class=\"alert alert-success\">" . __("tracker_removed") . "</div>";
+    }
+}
+
+$files_list = [];
+$excluded = ["admin", "uploads", "core", "templates", "tinymce", "js", "css"];
+foreach (glob($root_dir . "*") as $item) {
+    $basename = basename($item);
+    if (is_file($item) && !in_array($basename, $excluded) && in_array(pathinfo($item, PATHINFO_EXTENSION), ["php", "html", "htm", "phtml", "inc"])) {
+        $files_list[] = $basename;
+    }
+}
+?>
+<!DOCTYPE html>
+<html lang="<?= currentLanguage() ?>">
+<head>
+    <meta charset="UTF-8">
+    <title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="/admin/css/admin.css">
+</head>
+<body class="theme-<?= getSetting("admin_theme", "light") ?>">
+    <?php include "includes/header.php"; ?>
+    <div class="container-fluid">
+        <div class="row">
+            <?php include "includes/sidebar.php"; ?>
+            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
+                <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+                    <h1 class="h2"><?= $pageTitle ?></h1>
+                </div>
+                <?= $message ?>
+                <form method="post">
+                    <div class="mb-3">
+                        <label class="form-label"><?= __("select_files") ?></label>
+                        <select class="form-select" name="files[]" multiple size="10">
+                            <?php foreach ($files_list as $f): ?>
+                                <option value="<?= htmlspecialchars($f) ?>"><?= htmlspecialchars($f) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                        <div class="form-text">Удерживайте Ctrl для выбора нескольких файлов.</div>
+                    </div>
+                    <button type="submit" name="action" value="inject" class="btn btn-primary"><i class="bi bi-code-slash"></i> <?= __("inject_tracker") ?></button>
+                    <button type="submit" name="action" value="remove" class="btn btn-danger ms-2"><i class="bi bi-trash"></i> <?= __("remove_tracker") ?></button>
+                </form>
+                <hr>
+                <h4><?= __("manual_instruction") ?></h4>
+                <p><?= __("manual_text") ?></p>
+                <pre class="bg-light p-3">PHP: <?= htmlspecialchars($tracker_php_code) ?><br>HTML: <?= htmlspecialchars($tracker_js_code) ?></pre>
+            </main>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
 ANALYTICS
+
 log_only "Все файлы админ-панели созданы."
 
 # ----------------------------------------------------------------------
@@ -934,9 +1062,52 @@ echo "<h1>404 - Page not found</h1>";
 '
 
 # ----------------------------------------------------------------------
-# 10. Интеграция трекера в index.php (если существует)
+# 10. Интеграция трекера в index.php и создание JS-трекера
 # ----------------------------------------------------------------------
 next_step "Интеграция трекера посещений"
+
+# Создаём track.php для JS-трекера
+cat > "$SITE_DIR/track.php" <<'TRACKPHP'
+<?php
+require_once __DIR__ . "/config.php";
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+    $ip = $_SERVER["HTTP_X_FORWARDED_FOR"] ?? $_SERVER["REMOTE_ADDR"] ?? "";
+    $ua = $_SERVER["HTTP_USER_AGENT"] ?? "";
+    $url = $_POST["url"] ?? $_SERVER["HTTP_REFERER"] ?? "";
+    try {
+        $stmt = $pdo->prepare("INSERT INTO visits (visit_date, visitor_ip, user_agent, page_url) VALUES (CURDATE(), ?, ?, ?)");
+        $stmt->execute([$ip, $ua, $url]);
+        http_response_code(204);
+    } catch (Exception $e) {
+        http_response_code(500);
+    }
+} else {
+    http_response_code(405);
+}
+TRACKPHP
+
+# Создаём JS-трекер
+mkdir -p "$SITE_DIR/js"
+cat > "$SITE_DIR/js/tracker.js" <<'JSCODE'
+(function() {
+    if (window._trackerInited) return;
+    window._trackerInited = true;
+    function trackVisit() {
+        const url = window.location.pathname + window.location.search;
+        const data = new URLSearchParams();
+        data.append("url", url);
+        navigator.sendBeacon("/track.php", data);
+    }
+    if (document.readyState === "complete") {
+        trackVisit();
+    } else {
+        window.addEventListener("load", trackVisit);
+    }
+})();
+JSCODE
+chown www-data:www-data "$SITE_DIR/js/tracker.js"
+
+# PHP-трекер
 TRACKER_PHP='<?php
 if (isset($pdo) && strpos($_SERVER["REQUEST_URI"], "/admin") !== 0) {
     try {
