@@ -70,20 +70,54 @@ if [[ -z "${SSL_TYPE:-}" ]]; then
     echo "SSL_TYPE=\"$SSL_TYPE\"" >> "$SCRIPT_DIR/.env"
 fi
 
-# Если существующий сертификат – запрашиваем путь и конвертируем
+# Если существующий сертификат – автоматически ищем или запрашиваем путь
 if [[ "$SSL_TYPE" == "existing" ]]; then
     if [[ -z "${SSL_CERT_DIR:-}" ]]; then
-        ask_var SSL_CERT_DIR "Введите путь к папке с файлами сертификатов (.key, .crt/.cer, ca.crt)" "/root/ssl/$DOMAIN" ""
+        # Автоматический поиск возможных папок
+        CANDIDATES=(
+            "/root/${DOMAIN}"
+            "/root/ssl/${DOMAIN}"
+            "/etc/ssl/${DOMAIN}"
+            "/etc/letsencrypt/live/${DOMAIN}"
+        )
+        FOUND_DIR=""
+        for dir in "${CANDIDATES[@]}"; do
+            if [[ -d "$dir" ]]; then
+                # Проверяем, есть ли в папке .key и .crt/.cer
+                if ls "$dir"/*.key 1> /dev/null 2>&1 && ls "$dir"/*.{crt,cer} 1> /dev/null 2>&1; then
+                    FOUND_DIR="$dir"
+                    break
+                fi
+            fi
+        done
+        if [[ -n "$FOUND_DIR" ]]; then
+            log "${GREEN}Найдена папка с сертификатами: $FOUND_DIR${NC}"
+            read -p "Использовать её? (y/n): " use_found
+            if [[ "$use_found" =~ ^[YyДд]$ ]]; then
+                SSL_CERT_DIR="$FOUND_DIR"
+            else
+                ask_var SSL_CERT_DIR "Введите путь к папке с файлами сертификатов (.key, .crt/.cer, ca.crt)" "" ""
+            fi
+        else
+            ask_var SSL_CERT_DIR "Введите путь к папке с файлами сертификатов (.key, .crt/.cer, ca.crt)" "" ""
+        fi
         echo "SSL_CERT_DIR=\"$SSL_CERT_DIR\"" >> "$SCRIPT_DIR/.env"
     fi
     
-    # Поиск файлов
+    # Проверяем существование папки и наличие файлов
+    if [[ ! -d "$SSL_CERT_DIR" ]]; then
+        log "${RED}Папка $SSL_CERT_DIR не существует.${NC}"
+        exit 1
+    fi
+    
+    # Поиск файлов с проверкой существования папки
     KEY_FILE=$(find "$SSL_CERT_DIR" -maxdepth 1 -type f \( -name "*.key" -o -name "*.pem" \) | grep -i "key" | head -n1)
     CERT_FILE=$(find "$SSL_CERT_DIR" -maxdepth 1 -type f \( -name "*.crt" -o -name "*.cer" -o -name "*.pem" \) | grep -v "ca" | grep -v "key" | head -n1)
     CA_FILE=$(find "$SSL_CERT_DIR" -maxdepth 1 -type f \( -name "ca.crt" -o -name "ca.cer" -o -name "*.ca" \) | head -n1)
     
     if [[ -z "$KEY_FILE" || -z "$CERT_FILE" ]]; then
         log "${RED}Не удалось найти ключ или сертификат в $SSL_CERT_DIR${NC}"
+        log "Убедитесь, что в папке есть файл с расширением .key и файл .crt/.cer"
         exit 1
     fi
     
