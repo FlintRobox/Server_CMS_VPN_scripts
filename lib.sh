@@ -57,7 +57,12 @@ show_progress() {
 # Аргументы: create_php_file <путь_к_файлу> "содержимое"
 create_php_file() {
     local file="$1"
-    local content="$2"
+    local content=""
+    if [[ $# -ge 2 ]]; then
+        content="$2"
+    else
+        content=$(cat)
+    fi
     local backup_ext=".backup.$(date +%Y%m%d%H%M%S)"
     
     if [[ -f "$file" ]] && [[ "$FORCE_MODE" == false ]]; then
@@ -65,20 +70,15 @@ create_php_file() {
         return 1
     fi
     
-    # Создаём резервную копию, если файл существует
     if [[ -f "$file" ]]; then
         cp "$file" "$file$backup_ext"
         log_only "Создана резервная копия $file$backup_ext"
     fi
     
-    # Создаём директорию, если её нет
     mkdir -p "$(dirname "$file")"
-    
-    # Записываем содержимое
     echo "$content" > "$file"
     log_only "Файл $file создан/обновлён."
     
-    # Проверяем синтаксис PHP (если файл имеет расширение .php)
     if [[ "$file" == *.php ]]; then
         if ! php -l "$file" >> "$LOG_FILE" 2>&1; then
             log "${RED}КРИТИЧЕСКАЯ ОШИБКА: Файл $file содержит синтаксическую ошибку.${NC}"

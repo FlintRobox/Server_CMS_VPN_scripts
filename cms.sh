@@ -205,7 +205,8 @@ CURRENT_STEP=0
 
 next_step() {
     CURRENT_STEP=$((CURRENT_STEP + 1))
-    echo "[${CURRENT_STEP}/${TOTAL_STEPS}] $1"
+    local percent=$(( CURRENT_STEP * 100 / TOTAL_STEPS ))
+    echo "[${percent}%] $1"
 }
 
 # ----------------------------------------------------------------------
