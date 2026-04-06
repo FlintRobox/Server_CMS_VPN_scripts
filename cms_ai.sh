@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # ai.sh - Интеграция AI DeepSeek в админ-панель CMS
-# Версия: 2.0 (безопасная, без повреждения файлов админки)
+# Версия: 2.1 (исправлена ошибка прогресса, добавлен curl, таймауты)
 # Добавляет раздел генерации контента, историю запросов,
 # кнопку в TinyMCE через отдельный плагин, настройки API ключа.
 # =====================================================================
@@ -25,6 +25,13 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# --- Проверка наличия curl и расширения PHP curl ---
+if ! command -v curl &>/dev/null; then
+    log "${YELLOW}Установка php8.3-curl...${NC}"
+    apt update && apt install -y php8.3-curl >> "$LOG_FILE" 2>&1
+    systemctl restart php8.3-fpm
+fi
+
 # --- Загрузка конфигурации ---
 load_env "DOMAIN" "DB_NAME" "DB_USER" "DB_PASSWORD"
 
@@ -44,7 +51,7 @@ TOTAL_STEPS=8
 CURRENT_STEP=0
 
 next_step() {
-    CURRENT_STEP=$((CURRENT_STEPS + 1))
+    CURRENT_STEP=$((CURRENT_STEP + 1))
     local percent=$(( CURRENT_STEP * 100 / TOTAL_STEPS ))
     echo "[${percent}%] $1"
 }
@@ -140,6 +147,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["prompt"])) {
         ];
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
         curl_setopt($ch, CURLOPT_HTTPHEADER, [
             "Content-Type: application/json",
             "Authorization: Bearer $api_key"
@@ -207,6 +215,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["prompt"])) {
                         </div>
                         <button class="btn btn-success" onclick="createPage()"><i class="bi bi-file-earmark-plus"></i> Создать страницу</button>
                         <button class="btn btn-info" onclick="insertToEditor()"><i class="bi bi-pencil-square"></i> Вставить в редактор</button>
+                        <p class="mt-2 text-muted small">Примечание: кнопка «Создать страницу» создаст пустую страницу, содержимое нужно будет вставить вручную.</p>
                     </div>
                 </div>
                 <?php endif; ?>
@@ -219,17 +228,17 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["prompt"])) {
     </div>
     <script>
     function insertToEditor() {
+        if (!window.opener || !window.opener.tinymce) {
+            alert("Эта функция работает только при вызове из редактора TinyMCE");
+            return;
+        }
         var text = document.getElementById("generated_text").innerText;
-        if (window.opener && window.opener.tinymce) {
-            var editor = window.opener.tinymce.activeEditor;
-            if (editor) {
-                editor.insertContent(text);
-                window.close();
-            } else {
-                alert("Редактор не найден");
-            }
+        var editor = window.opener.tinymce.activeEditor;
+        if (editor) {
+            editor.insertContent(text);
+            window.close();
         } else {
-            alert("Окно не связано с редактором");
+            alert("Редактор не найден");
         }
     }
     function createPage() {
@@ -393,6 +402,7 @@ $data = [
 ];
 curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 curl_setopt($ch, CURLOPT_POST, true);
+curl_setopt($ch, CURLOPT_TIMEOUT, 30);
 curl_setopt($ch, CURLOPT_HTTPHEADER, [
     "Content-Type: application/json",
     "Authorization: Bearer $api_key"
