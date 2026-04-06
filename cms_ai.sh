@@ -421,58 +421,52 @@ log_only "ai_api.php создан."
 # ----------------------------------------------------------------------
 next_step "Интеграция кнопки AI в редактор TinyMCE"
 
-# Функция для добавления кнопки в конфигурацию TinyMCE
-add_ai_button_to_tinymce() {
-    local file="$1"
-    if [[ ! -f "$file" ]]; then
-        return
-    fi
-    # Проверяем, есть ли уже кнопка AI
-    if grep -q "ai_button" "$file"; then
-        log "${YELLOW}Кнопка AI уже добавлена в $file. Пропуск.${NC}"
-        return
-    fi
-    # Создаём резервную копию
-    cp "$file" "$file.bak.$(date +%Y%m%d%H%M%S)"
-    # Добавляем JavaScript код для AI кнопки
-    # Ищем строку с tinymce.init и вставляем после неё или в toolbar
-    sed -i '/tinymce.init({/a \
-    setup: function(editor) {\
-        editor.ui.registry.addButton("ai_button", {\
-            text: "AI",\
-            tooltip: "Generate with DeepSeek",\
-            icon: "robot",\
-            onAction: function() {\
-                var prompt = prompt("Введите запрос для AI:");\
-                if (prompt) {\
-                    fetch("/admin/ai_api.php", {\
-                        method: "POST",\
-                        headers: { "Content-Type": "application/x-www-form-urlencoded" },\
-                        body: "prompt=" + encodeURIComponent(prompt)\
-                    })\
-                    .then(response => response.json())\
-                    .then(data => {\
-                        if (data.response) {\
-                            editor.insertContent(data.response);\
-                        } else if (data.error) {\
-                            alert(data.error);\
-                        }\
-                    })\
-                    .catch(err => alert("Ошибка: " + err));\
-                }\
-            }\
-        });\
-    },' "$file"
-    
-    # Добавляем кнопку в toolbar (если есть строка toolbar)
-    if grep -q "toolbar:" "$file"; then
-        sed -i 's/toolbar: "\(.*\)"/toolbar: "\1 ai_button"/' "$file"
-    fi
-    log_only "Кнопка AI добавлена в $file"
-}
+# Создаём отдельный JavaScript-файл для кнопки AI
+cat > "$ADMIN_DIR/js/ai_tinymce_plugin.js" <<'JSCODE'
+tinymce.PluginManager.add('ai_button', function(editor, url) {
+    editor.ui.registry.addButton('ai_button', {
+        text: 'AI',
+        tooltip: 'Generate with DeepSeek',
+        icon: 'robot',
+        onAction: function() {
+            var prompt = prompt("Введите запрос для AI:");
+            if (prompt) {
+                fetch("/admin/ai_api.php", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    body: "prompt=" + encodeURIComponent(prompt)
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.response) {
+                        editor.insertContent(data.response);
+                    } else if (data.error) {
+                        alert(data.error);
+                    }
+                })
+                .catch(err => alert("Ошибка: " + err));
+            }
+        }
+    });
+});
+JSCODE
 
-add_ai_button_to_tinymce "$ADMIN_DIR/edit_page.php"
-add_ai_button_to_tinymce "$ADMIN_DIR/edit_file.php"
+# Добавляем подключение плагина в tinymce.init в edit_page.php и edit_file.php
+# Безопасно вставляем строку external_plugins после selector
+for file in "$ADMIN_DIR/edit_page.php" "$ADMIN_DIR/edit_file.php"; do
+    if [[ -f "$file" ]]; then
+        # Проверяем, есть ли уже подключение
+        if ! grep -q "external_plugins" "$file"; then
+            cp "$file" "$file.bak.$(date +%Y%m%d%H%M%S)"
+            # Вставляем external_plugins после строки selector
+            sed -i '/selector: "#content",/a \ \ \ \ external_plugins: { "ai_button": "/admin/js/ai_tinymce_plugin.js" },' "$file"
+            # Добавляем кнопку в toolbar, если её нет
+            if ! grep -q "ai_button" "$file"; then
+                sed -i 's/toolbar: "\(.*\)"/toolbar: "\1 ai_button"/' "$file"
+            fi
+        fi
+    fi
+done
 
 # ----------------------------------------------------------------------
 # 7. Добавление пунктов меню в sidebar.php
