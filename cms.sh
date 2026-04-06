@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
-# cms.sh - Полная установка CMS и настройка сайта
-# Версия: 6.0 
+# cms.sh - Полная установка CMS, админ-панели, AI DeepSeek
+# Версия: 7.1 (исправлены ошибки, удалён импорт страниц)
 # =====================================================================
 
 set -euo pipefail
@@ -27,6 +27,13 @@ TINYMCE_VERSION="6.8.3"
 if [[ $EUID -ne 0 ]]; then
     log "${RED}Ошибка: скрипт должен запускаться от root (или с sudo).${NC}"
     exit 1
+fi
+
+# --- Проверка наличия curl и расширения PHP curl для AI ---
+if ! command -v curl &>/dev/null; then
+    log "${YELLOW}Установка php8.3-curl...${NC}"
+    apt update && apt install -y php8.3-curl >> "$LOG_FILE" 2>&1
+    systemctl restart php8.3-fpm
 fi
 
 # --- Загрузка/создание .env и запрос параметров ---
@@ -259,7 +266,7 @@ mysql $MYSQL_ROOT_OPTS -e "FLUSH PRIVILEGES;"
 log_only "База данных и пользователь созданы."
 
 # ----------------------------------------------------------------------
-# 4. Таблицы CMS
+# 4. Таблицы CMS (включая ai_requests)
 # ----------------------------------------------------------------------
 next_step "Создание таблиц CMS"
 mysql $MYSQL_ROOT_OPTS "$DB_NAME" <<EOF
@@ -329,14 +336,24 @@ CREATE TABLE IF NOT EXISTS files (
     INDEX (uploaded_by),
     FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS ai_requests (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    prompt TEXT NOT NULL,
+    response TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    user_id INT NOT NULL,
+    INDEX (user_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
 EOF
 
 ADMIN_HASH=$(php -r "echo password_hash('$ADMIN_PASSWORD', PASSWORD_DEFAULT);")
 mysql $MYSQL_ROOT_OPTS "$DB_NAME" -e "INSERT IGNORE INTO users (login, password_hash, role, email) VALUES ('admin', '$ADMIN_HASH', 'admin', '$ADMIN_EMAIL');"
-log_only "Таблицы CMS созданы, администратор добавлен."
+log_only "Таблицы CMS и AI созданы, администратор добавлен."
 
 # ----------------------------------------------------------------------
-# 5. Языковые файлы (полные)
+# 5. Языковые файлы (полные, включая AI)
 # ----------------------------------------------------------------------
 next_step "Создание языковых файлов"
 
@@ -400,7 +417,6 @@ return [
     'created_at' => 'Дата создания',
     'actions' => 'Действия',
     'file' => 'Файл',
-    'import_to_db' => 'Перенести в БД',
     'slug_auto' => 'Оставьте пустым для автоматической генерации',
     'cancel' => 'Отмена',
     'preview' => 'Предпросмотр',
@@ -444,6 +460,8 @@ return [
     'manual_text_php' => 'Скопируйте этот код и вставьте в начало каждого PHP-файла (после &lt;?php), для которого нужен сбор статистики:',
     'manual_text_html' => 'Скопируйте этот код и вставьте перед закрывающим тегом &lt;/body&gt; в HTML-файлах:',
     'manual_note' => 'Примечание: Файл /js/tracker.js уже создан системой. Убедитесь, что он доступен по указанному пути.',
+    'ai_generator' => 'Генератор AI',
+    'ai_history' => 'История AI',
 ];
 RUEOF
 
@@ -507,7 +525,6 @@ return [
     'created_at' => 'Created at',
     'actions' => 'Actions',
     'file' => 'File',
-    'import_to_db' => 'Import to DB',
     'slug_auto' => 'Leave empty to auto-generate',
     'cancel' => 'Cancel',
     'preview' => 'Preview',
@@ -551,12 +568,14 @@ return [
     'manual_text_php' => 'Copy this code and paste it at the beginning of each PHP file (after &lt;?php) that needs statistics:',
     'manual_text_html' => 'Copy this code and paste it before the closing &lt;/body&gt; tag in HTML files:',
     'manual_note' => 'Note: The file /js/tracker.js has already been created by the system. Make sure it is accessible at the specified path.',
+    'ai_generator' => 'AI Generator',
+    'ai_history' => 'AI History',
 ];
 ENEOF
 log_only "Языковые файлы созданы."
 
 # ----------------------------------------------------------------------
-# 6. Создание всех файлов административной панели
+# 6. Создание всех файлов административной панели (включая AI)
 # ----------------------------------------------------------------------
 next_step "Создание файлов админ-панели"
 
@@ -641,15 +660,15 @@ $site_name = getSetting("site_name", SITE_NAME);
 ?><header class="navbar navbar-dark sticky-top bg-dark flex-md-nowrap p-0 shadow"><a class="navbar-brand col-md-3 col-lg-2 me-0 px-3" href="/admin/"><?= htmlspecialchars($site_name) ?></a><button class="navbar-toggler position-absolute d-md-none collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#sidebarMenu"><span class="navbar-toggler-icon"></span></button><div class="w-100"></div><div class="navbar-nav"><div class="nav-item text-nowrap dropdown"><a class="nav-link dropdown-toggle text-white" href="#" id="langDropdown" data-bs-toggle="dropdown"><?= strtoupper(currentLanguage()) ?></a><ul class="dropdown-menu dropdown-menu-end"><li><a class="dropdown-item" href="?lang=ru">Русский</a></li><li><a class="dropdown-item" href="?lang=en">English</a></li></ul></div><div class="nav-item text-nowrap"><span class="nav-link px-3 text-white"><?= htmlspecialchars($current_user["login"] ?? "") ?></span></div></div></header><?php if(isset($_GET["lang"]) && in_array($_GET["lang"], ["ru","en"])) { $_SESSION["lang"] = $_GET["lang"]; header("Location: " . strtok($_SERVER["REQUEST_URI"], "?")); exit; } ?>
 HEADER
 
-# 6.6 sidebar.php
+# 6.6 sidebar.php (включая пункты AI)
 create_php_file "$ADMIN_DIR/includes/sidebar.php" <<'SIDEBAR'
-<?php $current_page = basename($_SERVER["PHP_SELF"]); ?><nav id="sidebarMenu" class="col-md-3 col-lg-2 d-md-block bg-light sidebar collapse"><div class="position-sticky pt-3"><ul class="nav flex-column"><li class="nav-item"><a class="nav-link <?= $current_page=="index.php"?"active":"" ?>" href="/admin/"><i class="bi bi-speedometer2"></i> <?= __("dashboard") ?></a></li><?php if(isAdmin()): ?><li class="nav-item"><a class="nav-link <?= $current_page=="users.php"?"active":"" ?>" href="/admin/users.php"><i class="bi bi-people"></i> <?= __("users") ?></a></li><?php endif; ?><li class="nav-item"><a class="nav-link <?= $current_page=="content.php"?"active":"" ?>" href="/admin/content.php"><i class="bi bi-files"></i> <?= __("content") ?></a></li><li class="nav-item"><a class="nav-link <?= $current_page=="files.php"?"active":"" ?>" href="/admin/files.php"><i class="bi bi-upload"></i> <?= __("files") ?></a></li><li class="nav-item"><a class="nav-link <?= $current_page=="stats.php"?"active":"" ?>" href="/admin/stats.php"><i class="bi bi-graph-up"></i> <?= __("server_stats") ?></a></li><li class="nav-item"><a class="nav-link <?= $current_page=="visitors.php"?"active":"" ?>" href="/admin/visitors.php"><i class="bi bi-eye"></i> <?= __("visitors") ?></a></li><li class="nav-item"><a class="nav-link <?= $current_page=="analytics.php"?"active":"" ?>" href="/admin/analytics.php"><i class="bi bi-bar-chart-steps"></i> <?= __("analytics") ?></a></li><li class="nav-item"><a class="nav-link <?= $current_page=="settings.php"?"active":"" ?>" href="/admin/settings.php"><i class="bi bi-gear"></i> <?= __("settings") ?></a></li><li class="nav-item"><a class="nav-link" href="/admin/logout.php"><i class="bi bi-box-arrow-right"></i> <?= __("logout") ?></a></li></ul></div></nav>
+<?php $current_page = basename($_SERVER["PHP_SELF"]); ?><nav id="sidebarMenu" class="col-md-3 col-lg-2 d-md-block bg-light sidebar collapse"><div class="position-sticky pt-3"><ul class="nav flex-column"><li class="nav-item"><a class="nav-link <?= $current_page=="index.php"?"active":"" ?>" href="/admin/"><i class="bi bi-speedometer2"></i> <?= __("dashboard") ?></a></li><?php if(isAdmin()): ?><li class="nav-item"><a class="nav-link <?= $current_page=="users.php"?"active":"" ?>" href="/admin/users.php"><i class="bi bi-people"></i> <?= __("users") ?></a></li><?php endif; ?><li class="nav-item"><a class="nav-link <?= $current_page=="content.php"?"active":"" ?>" href="/admin/content.php"><i class="bi bi-files"></i> <?= __("content") ?></a></li><li class="nav-item"><a class="nav-link <?= $current_page=="files.php"?"active":"" ?>" href="/admin/files.php"><i class="bi bi-upload"></i> <?= __("files") ?></a></li><li class="nav-item"><a class="nav-link <?= $current_page=="stats.php"?"active":"" ?>" href="/admin/stats.php"><i class="bi bi-graph-up"></i> <?= __("server_stats") ?></a></li><li class="nav-item"><a class="nav-link <?= $current_page=="visitors.php"?"active":"" ?>" href="/admin/visitors.php"><i class="bi bi-eye"></i> <?= __("visitors") ?></a></li><li class="nav-item"><a class="nav-link <?= $current_page=="analytics.php"?"active":"" ?>" href="/admin/analytics.php"><i class="bi bi-bar-chart-steps"></i> <?= __("analytics") ?></a></li><li class="nav-item"><a class="nav-link <?= $current_page=="ai_generator.php"?"active":"" ?>" href="/admin/ai_generator.php"><i class="bi bi-robot"></i> <?= __("ai_generator") ?></a></li><li class="nav-item"><a class="nav-link <?= $current_page=="ai_history.php"?"active":"" ?>" href="/admin/ai_history.php"><i class="bi bi-clock-history"></i> <?= __("ai_history") ?></a></li><li class="nav-item"><a class="nav-link <?= $current_page=="settings.php"?"active":"" ?>" href="/admin/settings.php"><i class="bi bi-gear"></i> <?= __("settings") ?></a></li><li class="nav-item"><a class="nav-link" href="/admin/logout.php"><i class="bi bi-box-arrow-right"></i> <?= __("logout") ?></a></li></ul></div></nav>
 SIDEBAR
 
 # 6.7 index.php (дашборд)
 create_php_file "$ADMIN_DIR/index.php" <<'DASHBOARD'
 <?php require_once "includes/auth.php"; requireLogin(); $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("dashboard"); ?>
-<!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"><script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1></div><div class="row"><?php $load = sys_getloadavg(); $cpu_load = $load[0] ?? 0; $meminfo = file_get_contents("/proc/meminfo"); preg_match("/MemTotal:\s+(\d+)/", $meminfo, $matches); $mem_total = $matches[1] ?? 0; preg_match("/MemAvailable:\s+(\d+)/", $meminfo, $matches); $mem_avail = $matches[1] ?? 0; $mem_used_percent = $mem_total ? round(($mem_total - $mem_avail) / $mem_total * 100, 1) : 0; $disk_total = disk_total_space("/"); $disk_free = disk_free_space("/"); $disk_used_percent = $disk_total ? round(($disk_total - $disk_free) / $disk_total * 100, 1) : 0; $stmt = $pdo->query("SELECT COUNT(*) FROM pages WHERE status=\"published\""); $pages_count = $stmt->fetchColumn(); ?><div class="col-md-3 mb-3"><div class="card text-white bg-primary"><div class="card-body"><h5 class="card-title"><i class="bi bi-cpu"></i> <?= __("cpu_load") ?></h5><p class="display-6"><?= $cpu_load ?></p></div></div></div><div class="col-md-3 mb-3"><div class="card text-white bg-success"><div class="card-body"><h5 class="card-title"><i class="bi bi-memory"></i> <?= __("ram_usage") ?></h5><p class="display-6"><?= $mem_used_percent ?>%</p></div></div></div><div class="col-md-3 mb-3"><div class="card text-white bg-warning"><div class="card-body"><h5 class="card-title"><i class="bi bi-hdd"></i> <?= __("disk_usage") ?></h5><p class="display-6"><?= $disk_used_percent ?>%</p></div></div></div><div class="col-md-3 mb-3"><div class="card text-white bg-info"><div class="card-body"><h5 class="card-title"><i class="bi bi-file-text"></i> <?= __("pages_count") ?></h5><p class="display-6"><?= $pages_count ?></p></div></div></div></div><div class="row mt-4"><div class="col-md-12"><div class="card"><div class="card-header"><i class="bi bi-bar-chart-line"></i> <?= __("visits_last_7_days") ?></div><div class="card-body"><canvas id="visitsChart" style="height:300px;"></canvas></div></div></div></div><div class="row mt-4"><div class="col-md-12"><div class="card"><div class="card-header"><i class="bi bi-clock-history"></i> <?= __("last_visits") ?></div><div class="card-body"><table class="table table-sm"><thead><tr><th><?= __("time") ?></th><th><?= __("ip") ?></th><th><?= __("page") ?></th><th><?= __("user_agent") ?></th></tr></thead><tbody><?php $stmt = $pdo->query("SELECT * FROM visits ORDER BY created_at DESC LIMIT 5"); while($row = $stmt->fetch(PDO::FETCH_ASSOC)): ?><tr><td><?= htmlspecialchars($row["created_at"]) ?></td><td><?= htmlspecialchars($row["visitor_ip"]) ?></td><td><?= htmlspecialchars($row["page_url"]) ?></td><td><?= htmlspecialchars(substr($row["user_agent"],0,50)) ?>…</td></tr><?php endwhile; ?></tbody><td></div></div></div></div></main></div></div><script>fetch("/admin/api/visits_last_7.php").then(r=>r.json()).then(data=>{new Chart(document.getElementById("visitsChart"),{type:"line",data:{labels:data.labels,datasets:[{label:"<?= __("visits") ?>",data:data.values,borderColor:"rgb(75,192,192)",tension:0.1}]}})});</script><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
+<!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"><script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1></div><div class="row"><?php $load = sys_getloadavg(); $cpu_load = $load[0] ?? 0; $meminfo = file_get_contents("/proc/meminfo"); preg_match("/MemTotal:\s+(\d+)/", $meminfo, $matches); $mem_total = $matches[1] ?? 0; preg_match("/MemAvailable:\s+(\d+)/", $meminfo, $matches); $mem_avail = $matches[1] ?? 0; $mem_used_percent = $mem_total ? round(($mem_total - $mem_avail) / $mem_total * 100, 1) : 0; $disk_total = disk_total_space("/"); $disk_free = disk_free_space("/"); $disk_used_percent = $disk_total ? round(($disk_total - $disk_free) / $disk_total * 100, 1) : 0; $stmt = $pdo->query("SELECT COUNT(*) FROM pages WHERE status=\"published\""); $pages_count = $stmt->fetchColumn(); ?><div class="col-md-3 mb-3"><div class="card text-white bg-primary"><div class="card-body"><h5 class="card-title"><i class="bi bi-cpu"></i> <?= __("cpu_load") ?></h5><p class="display-6"><?= $cpu_load ?></p></div></div></div><div class="col-md-3 mb-3"><div class="card text-white bg-success"><div class="card-body"><h5 class="card-title"><i class="bi bi-memory"></i> <?= __("ram_usage") ?></h5><p class="display-6"><?= $mem_used_percent ?>%</p></div></div></div><div class="col-md-3 mb-3"><div class="card text-white bg-warning"><div class="card-body"><h5 class="card-title"><i class="bi bi-hdd"></i> <?= __("disk_usage") ?></h5><p class="display-6"><?= $disk_used_percent ?>%</p></div></div></div><div class="col-md-3 mb-3"><div class="card text-white bg-info"><div class="card-body"><h5 class="card-title"><i class="bi bi-file-text"></i> <?= __("pages_count") ?></h5><p class="display-6"><?= $pages_count ?></p></div></div></div></div><div class="row mt-4"><div class="col-md-12"><div class="card"><div class="card-header"><i class="bi bi-bar-chart-line"></i> <?= __("visits_last_7_days") ?></div><div class="card-body"><canvas id="visitsChart" style="height:300px;"></canvas></div></div></div></div><div class="row mt-4"><div class="col-md-12"><div class="card"><div class="card-header"><i class="bi bi-clock-history"></i> <?= __("last_visits") ?></div><div class="card-body"><table class="table table-sm"><thead><tr><th><?= __("time") ?></th><th><?= __("ip") ?></th><th><?= __("page") ?></th><th><?= __("user_agent") ?></th><tr></thead><tbody><?php $stmt = $pdo->query("SELECT * FROM visits ORDER BY created_at DESC LIMIT 5"); while($row = $stmt->fetch(PDO::FETCH_ASSOC)): ?><tr><td><?= htmlspecialchars($row["created_at"]) ?></td><td><?= htmlspecialchars($row["visitor_ip"]) ?></td><td><?= htmlspecialchars($row["page_url"]) ?></td><td><?= htmlspecialchars(substr($row["user_agent"],0,50)) ?>…</td></tr><?php endwhile; ?></tbody></table></div></div></div></div></main></div></div><script>fetch("/admin/api/visits_last_7.php").then(r=>r.json()).then(data=>{new Chart(document.getElementById("visitsChart"),{type:"line",data:{labels:data.labels,datasets:[{label:"<?= __("visits") ?>",data:data.values,borderColor:"rgb(75,192,192)",tension:0.1}]}})});</script><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
 DASHBOARD
 
 # 6.8 API visits_last_7.php
@@ -668,8 +687,8 @@ create_php_file "$ADMIN_DIR/visitors.php" <<'VISITORS'
 <?php require_once "includes/auth.php"; requireLogin(); $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("visitors"); $date_from = $_GET["date_from"] ?? date("Y-m-d", strtotime("-7 days")); $date_to = $_GET["date_to"] ?? date("Y-m-d"); $ip_filter = $_GET["ip"] ?? ""; $sql = "SELECT * FROM visits WHERE visit_date BETWEEN :from AND :to"; $params = ["from" => $date_from, "to" => $date_to]; if($ip_filter) { $sql .= " AND visitor_ip LIKE :ip"; $params["ip"] = "%$ip_filter%"; } $sql .= " ORDER BY created_at DESC"; $stmt = $pdo->prepare($sql); $stmt->execute($params); $visits = $stmt->fetchAll(PDO::FETCH_ASSOC); $total_visits = count($visits); $unique_ips = count(array_unique(array_column($visits, "visitor_ip"))); ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1></div><div class="row mb-3"><div class="col-md-3"><div class="card text-white bg-info"><div class="card-body"><h5 class="card-title"><?= __("total_visits") ?></h5><p class="display-6"><?= $total_visits ?></p></div></div></div><div class="col-md-3"><div class="card text-white bg-success"><div class="card-body"><h5 class="card-title"><?= __("unique_ips") ?></h5><p class="display-6"><?= $unique_ips ?></p></div></div></div></div><form method="get" class="row g-3 mb-4"><div class="col-auto"><label class="form-label"><?= __("from") ?>:</label><input type="date" class="form-control" name="date_from" value="<?= $date_from ?>"></div><div class="col-auto"><label class="form-label"><?= __("to") ?>:</label><input type="date" class="form-control" name="date_to" value="<?= $date_to ?>"></div><div class="col-auto"><label class="form-label">IP</label><input type="text" class="form-control" name="ip" placeholder="часть IP" value="<?= htmlspecialchars($ip_filter) ?>"></div><div class="col-auto align-self-end"><button type="submit" class="btn btn-primary"><?= __("filter") ?></button><a href="visitors.php" class="btn btn-secondary ms-2"><?= __("reset") ?></a></div></form><table class="table table-striped"><thead><tr><th><?= __("time") ?></th><th><?= __("ip") ?></th><th><?= __("page") ?></th><th><?= __("user_agent") ?></th></tr></thead><tbody><?php foreach($visits as $v): ?><tr><td><?= htmlspecialchars($v["created_at"]) ?></td><td><?= htmlspecialchars($v["visitor_ip"]) ?></td><td><?= htmlspecialchars($v["page_url"]) ?></td><td><?= htmlspecialchars($v["user_agent"]) ?></td></tr><?php endforeach; ?></tbody></table></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
 VISITORS
 
-# 6.12 settings.php
-create_php_file "$ADMIN_DIR/settings.php" <<'SETTINGS'
+# 6.12 settings.php (с настройками AI)
+cat > "$ADMIN_DIR/settings.php" <<'SETTINGS'
 <?php
 require_once "includes/auth.php";
 requireAdmin();
@@ -681,7 +700,7 @@ while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
     $settings[$row["key"]] = $row["value"];
 }
 if ($_SERVER["REQUEST_METHOD"] === "POST") {
-    $keys = ["site_name", "admin_email", "admin_theme", "stats_retention", "admin_lang"];
+    $keys = ["site_name", "admin_email", "admin_theme", "stats_retention", "admin_lang", "deepseek_api_key", "deepseek_model", "deepseek_max_tokens"];
     foreach ($keys as $key) {
         if (isset($_POST[$key])) {
             $pdo->prepare("INSERT INTO settings (`key`, `value`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)")
@@ -742,6 +761,24 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                             <option value="en" <?= ($settings["admin_lang"] ?? "") == "en" ? "selected" : "" ?>>English</option>
                         </select>
                     </div>
+                    <hr>
+                    <h4 class="mt-4">DeepSeek AI Settings</h4>
+                    <div class="mb-3">
+                        <label class="form-label">API Key DeepSeek</label>
+                        <input type="password" class="form-control" name="deepseek_api_key" value="<?= htmlspecialchars($settings["deepseek_api_key"] ?? "") ?>">
+                        <div class="form-text">Получите ключ на platform.deepseek.com</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Модель</label>
+                        <select class="form-select" name="deepseek_model">
+                            <option value="deepseek-chat" <?= ($settings["deepseek_model"] ?? "deepseek-chat") == "deepseek-chat" ? "selected" : "" ?>>DeepSeek Chat</option>
+                            <option value="deepseek-coder" <?= ($settings["deepseek_model"] ?? "") == "deepseek-coder" ? "selected" : "" ?>>DeepSeek Coder</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Max tokens</label>
+                        <input type="number" class="form-control" name="deepseek_max_tokens" value="<?= htmlspecialchars($settings["deepseek_max_tokens"] ?? 2000) ?>" min="100" max="8000">
+                    </div>
                     <button type="submit" class="btn btn-primary"><?= __("save") ?></button>
                 </form>
             </main>
@@ -751,6 +788,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 </body>
 </html>
 SETTINGS
+chown www-data:www-data "$ADMIN_DIR/settings.php"
+chmod 644 "$ADMIN_DIR/settings.php"
+log_only "settings.php создан."
 
 # 6.13 users.php
 create_php_file "$ADMIN_DIR/users.php" <<'USERS'
@@ -880,46 +920,43 @@ function getPageTemplates() { $templates = []; $dir = __DIR__ . "/../../template
 function generateSlug($title) { $slug = preg_replace("/[^a-z0-9-]+/", "-", strtolower($title)); $slug = trim($slug, "-"); return $slug ?: "page"; }
 CONTENT_FUNCS
 
-# 6.15 content.php
+# 6.15 content.php (без кнопки импорта)
 create_php_file "$ADMIN_DIR/content.php" <<'CONTENT'
-<?php require_once __DIR__ . "/../config.php"; require_once "includes/auth.php"; requireLogin(); require_once "includes/content_functions.php"; $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("content"); $root_dir = __DIR__ . "/../"; $excluded_files = ["config.php","cms-router.php","index.php"]; $excluded_dirs = ["admin","uploads","core","templates","tinymce"]; $search = trim($_GET["search"] ?? ""); $order_by = $_GET["order_by"] ?? "created_at"; $order_dir = strtoupper($_GET["order_dir"] ?? "DESC"); $allowed_order = ["title","source","created_at"]; if(!in_array($order_by, $allowed_order)) $order_by = "created_at"; $order_dir = ($order_dir === "ASC") ? "ASC" : "DESC"; $db_pages = $pdo->query("SELECT id, title, slug, status, created_at, \"database\" as source FROM pages ORDER BY created_at DESC")->fetchAll(PDO::FETCH_ASSOC); $existing_slugs = array_column($db_pages, "slug"); $file_pages = []; $dir_handle = opendir($root_dir); while($entry = readdir($dir_handle)) { if($entry == "." || $entry == "..") continue; $full_path = $root_dir . $entry; if(is_dir($full_path)) continue; $ext = pathinfo($entry, PATHINFO_EXTENSION); $slug_without_ext = pathinfo($entry, PATHINFO_FILENAME); if(in_array($slug_without_ext, $existing_slugs)) continue; if(in_array($ext, ["php","html","htm"]) && !in_array($entry, $excluded_files)) { $file_pages[] = ["id" => null, "title" => $slug_without_ext, "slug" => $entry, "status" => "file", "created_at" => date("Y-m-d H:i:s", filemtime($full_path)), "source" => "file"]; } } closedir($dir_handle); if($search) { $db_pages = array_filter($db_pages, fn($i) => stripos($i["title"], $search) !== false); $file_pages = array_filter($file_pages, fn($i) => stripos($i["title"], $search) !== false); } $all_pages = array_merge($db_pages, $file_pages); usort($all_pages, function($a, $b) use ($order_by, $order_dir) { $val_a = $a[$order_by] ?? ""; $val_b = $b[$order_by] ?? ""; if($order_by === "created_at") { $val_a = strtotime($val_a); $val_b = strtotime($val_b); } return $order_dir === "ASC" ? $val_a <=> $val_b : $val_b <=> $val_a; }); function sort_link($field, $current_field, $current_dir) { $new_dir = ($current_field == $field && $current_dir == "DESC") ? "ASC" : "DESC"; $params = $_GET; $params["order_by"] = $field; $params["order_dir"] = $new_dir; $query = http_build_query($params); return "?$query"; } ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1><div><a href="edit_page.php" class="btn btn-sm btn-primary"><i class="bi bi-plus"></i> <?= __("new_page") ?></a></div></div><form method="get" class="row g-3 mb-4"><div class="col-auto"><input type="text" class="form-control" name="search" placeholder="<?= __("search") ?>" value="<?= htmlspecialchars($search) ?>"></div><div class="col-auto"><button type="submit" class="btn btn-primary"><?= __("filter") ?></button><a href="content.php" class="btn btn-secondary"><?= __("reset") ?></a></div></form><div class="table-responsive"><table class="table table-striped"><thead><tr><th><a href="<?= sort_link("title", $order_by, $order_dir) ?>"><?= __("title") ?></a></th><th><?= __("slug") ?></th><th><?= __("status") ?></th><th><a href="<?= sort_link("source", $order_by, $order_dir) ?>"><?= __("source") ?></a></th><th><a href="<?= sort_link("created_at", $order_by, $order_dir) ?>"><?= __("created_at") ?></a></th><th><?= __("actions") ?></th></tr></thead><tbody><?php foreach($all_pages as $item): ?><tr><td><?= htmlspecialchars($item["title"]) ?></td><td><?= htmlspecialchars($item["slug"]) ?></td><td><?php if($item["source"] == "database"): ?><?= getPageStatusBadge($item["status"]) ?><?php else: ?><span class="badge bg-secondary"><?= __("file") ?></span><?php endif; ?></td><td><?php if($item["source"] == "database"): ?><i class="bi bi-database"></i> <?= __("database") ?><?php else: ?><i class="bi bi-file-earmark-code"></i> <?= __("file_system") ?><?php endif; ?></td><td><?= htmlspecialchars($item["created_at"]) ?></td><td><?php if($item["source"] == "database"): ?><a href="edit_page.php?id=<?= $item["id"] ?>" class="btn btn-sm btn-primary"><i class="bi bi-pencil"></i> <?= __("edit") ?></a><a href="delete_page.php?id=<?= $item["id"] ?>" class="btn btn-sm btn-danger" onclick="return confirm(\'<?= __("confirm_delete") ?>\')"><i class="bi bi-trash"></i></a><?php else: ?><a href="edit_file.php?file=<?= urlencode($item["slug"]) ?>" class="btn btn-sm btn-primary"><i class="bi bi-pencil"></i> <?= __("edit") ?></a><?php if($item["slug"] === "index.html" || $item["slug"] === "index.php"): ?><a href="import_to_db.php?file=<?= urlencode($item["slug"]) ?>" class="btn btn-sm btn-success"><i class="bi bi-database"></i> <?= __("import_to_db") ?></a><?php endif; ?><?php endif; ?></td></tr><?php endforeach; ?></tbody></table></div></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
+<?php require_once __DIR__ . "/../config.php"; require_once "includes/auth.php"; requireLogin(); require_once "includes/content_functions.php"; $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("content"); $root_dir = __DIR__ . "/../"; $excluded_files = ["config.php","cms-router.php","index.php"]; $excluded_dirs = ["admin","uploads","core","templates","tinymce"]; $search = trim($_GET["search"] ?? ""); $order_by = $_GET["order_by"] ?? "created_at"; $order_dir = strtoupper($_GET["order_dir"] ?? "DESC"); $allowed_order = ["title","source","created_at"]; if(!in_array($order_by, $allowed_order)) $order_by = "created_at"; $order_dir = ($order_dir === "ASC") ? "ASC" : "DESC"; $db_pages = $pdo->query("SELECT id, title, slug, status, created_at, \"database\" as source FROM pages ORDER BY created_at DESC")->fetchAll(PDO::FETCH_ASSOC); $existing_slugs = array_column($db_pages, "slug"); $file_pages = []; $dir_handle = opendir($root_dir); while($entry = readdir($dir_handle)) { if($entry == "." || $entry == "..") continue; $full_path = $root_dir . $entry; if(is_dir($full_path)) continue; $ext = pathinfo($entry, PATHINFO_EXTENSION); $slug_without_ext = pathinfo($entry, PATHINFO_FILENAME); if(in_array($slug_without_ext, $existing_slugs)) continue; if(in_array($ext, ["php","html","htm"]) && !in_array($entry, $excluded_files)) { $file_pages[] = ["id" => null, "title" => $slug_without_ext, "slug" => $entry, "status" => "file", "created_at" => date("Y-m-d H:i:s", filemtime($full_path)), "source" => "file"]; } } closedir($dir_handle); if($search) { $db_pages = array_filter($db_pages, fn($i) => stripos($i["title"], $search) !== false); $file_pages = array_filter($file_pages, fn($i) => stripos($i["title"], $search) !== false); } $all_pages = array_merge($db_pages, $file_pages); usort($all_pages, function($a, $b) use ($order_by, $order_dir) { $val_a = $a[$order_by] ?? ""; $val_b = $b[$order_by] ?? ""; if($order_by === "created_at") { $val_a = strtotime($val_a); $val_b = strtotime($val_b); } return $order_dir === "ASC" ? $val_a <=> $val_b : $val_b <=> $val_a; }); function sort_link($field, $current_field, $current_dir) { $new_dir = ($current_field == $field && $current_dir == "DESC") ? "ASC" : "DESC"; $params = $_GET; $params["order_by"] = $field; $params["order_dir"] = $new_dir; $query = http_build_query($params); return "?$query"; } ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1><div><a href="edit_page.php" class="btn btn-sm btn-primary"><i class="bi bi-plus"></i> <?= __("new_page") ?></a></div></div><form method="get" class="row g-3 mb-4"><div class="col-auto"><input type="text" class="form-control" name="search" placeholder="<?= __("search") ?>" value="<?= htmlspecialchars($search) ?>"></div><div class="col-auto"><button type="submit" class="btn btn-primary"><?= __("filter") ?></button><a href="content.php" class="btn btn-secondary"><?= __("reset") ?></a></div></form><div class="table-responsive"><table class="table table-striped"><thead><tr><th><a href="<?= sort_link("title", $order_by, $order_dir) ?>"><?= __("title") ?></a></th><th><?= __("slug") ?></th><th><?= __("status") ?></th><th><a href="<?= sort_link("source", $order_by, $order_dir) ?>"><?= __("source") ?></a></th><th><a href="<?= sort_link("created_at", $order_by, $order_dir) ?>"><?= __("created_at") ?></a></th><th><?= __("actions") ?></th></tr></thead><tbody><?php foreach($all_pages as $item): ?><tr><td><?= htmlspecialchars($item["title"]) ?></td><td><?= htmlspecialchars($item["slug"]) ?></td><td><?php if($item["source"] == "database"): ?><?= getPageStatusBadge($item["status"]) ?><?php else: ?><span class="badge bg-secondary"><?= __("file") ?></span><?php endif; ?></td><td><?php if($item["source"] == "database"): ?><i class="bi bi-database"></i> <?= __("database") ?><?php else: ?><i class="bi bi-file-earmark-code"></i> <?= __("file_system") ?><?php endif; ?></td><td><?= htmlspecialchars($item["created_at"]) ?></td><td><?php if($item["source"] == "database"): ?><a href="edit_page.php?id=<?= $item["id"] ?>" class="btn btn-sm btn-primary"><i class="bi bi-pencil"></i> <?= __("edit") ?></a><a href="delete_page.php?id=<?= $item["id"] ?>" class="btn btn-sm btn-danger" onclick="return confirm(\'<?= __("confirm_delete") ?>\')"><i class="bi bi-trash"></i></a><?php else: ?><a href="edit_file.php?file=<?= urlencode($item["slug"]) ?>" class="btn btn-sm btn-primary"><i class="bi bi-pencil"></i> <?= __("edit") ?></a><?php endif; ?></td></tr><?php endforeach; ?></tbody></table></div></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
 CONTENT
 
-# 6.16 edit_page.php
+# 6.16 edit_page.php (с поддержкой AI-плагина и предзаполнением)
 create_php_file "$ADMIN_DIR/edit_page.php" <<'EDITPAGE'
-<?php require_once __DIR__ . "/../config.php"; require_once "includes/auth.php"; requireLogin(); require_once "includes/content_functions.php"; $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("edit_page"); $id = isset($_GET["id"]) ? (int)$_GET["id"] : 0; $is_new = $id === 0; if($is_new) { $page = ["id"=>0,"title"=>"","slug"=>"","content"=>"","meta_description"=>"","status"=>"draft","template"=>"default"]; } else { $stmt = $pdo->prepare("SELECT * FROM pages WHERE id = ?"); $stmt->execute([$id]); $page = $stmt->fetch(PDO::FETCH_ASSOC); if(!$page) die("Page not found"); } $message = ""; if($_SERVER["REQUEST_METHOD"] === "POST") { $title = trim($_POST["title"] ?? ""); $slug = trim($_POST["slug"] ?? ""); $content = $_POST["content"] ?? ""; $meta_description = trim($_POST["meta_description"] ?? ""); $status = $_POST["status"] ?? "draft"; $template = $_POST["template"] ?? "default"; $errors = []; if(empty($title)) $errors[] = __("title_required"); if(empty($slug)) $slug = generateSlug($title); $stmt = $pdo->prepare("SELECT id FROM pages WHERE slug = ? AND id != ?"); $stmt->execute([$slug, $id]); if($stmt->fetch()) $errors[] = __("slug_exists"); if(empty($errors)) { if($is_new) { $stmt = $pdo->prepare("INSERT INTO pages (title, slug, content, meta_description, status, template) VALUES (?,?,?,?,?,?)"); $stmt->execute([$title, $slug, $content, $meta_description, $status, $template]); $message = "<div class=\"alert alert-success\">".__("page_created")."</div>"; $id = $pdo->lastInsertId(); $is_new = false; } else { $stmt = $pdo->prepare("UPDATE pages SET title = ?, slug = ?, content = ?, meta_description = ?, status = ?, template = ? WHERE id = ?"); $stmt->execute([$title, $slug, $content, $meta_description, $status, $template, $id]); $message = "<div class=\"alert alert-success\">".__("page_saved")."</div>"; } $stmt = $pdo->prepare("SELECT * FROM pages WHERE id = ?"); $stmt->execute([$id]); $page = $stmt->fetch(PDO::FETCH_ASSOC); } else { $message = "<div class=\"alert alert-danger\"><ul><li>".implode("</li><li>", $errors)."</li></ul></div>"; } } $templates = getPageTemplates(); ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"><script src="/admin/tinymce/tinymce.min.js" referrerpolicy="origin"></script><script>tinymce.init({selector:"#content",height:500,plugins:"advlist anchor autolink autosave code codesample directionality emoticons fullscreen help hr image insertdatetime link lists media nonbreaking pagebreak paste preview print save searchreplace table visualblocks visualchars wordcount",toolbar:"undo redo | styles | bold italic underline strikethrough removeformat | alignleft aligncenter alignright alignjustify | bullist numlist outdent indent | link anchor image media | forecolor backcolor | fontselect fontsizeselect | code codesample | table | hr charmap pagebreak | visualblocks visualchars | fullscreen preview | wordcount save print | searchreplace | help",toolbar_mode:"floating",fontsize_formats:"8pt 10pt 12pt 14pt 16pt 18pt 24pt 36pt",image_title:true,automatic_uploads:true,images_upload_url:"/admin/upload.php",file_picker_types:"image",file_picker_callback:function(cb,value,meta){var input=document.createElement("input");input.setAttribute("type","file");input.setAttribute("accept","image/*");input.onchange=function(){var file=this.files[0];var formData=new FormData();formData.append("file",file);fetch("/admin/upload.php",{method:"POST",body:formData}).then(response=>response.json()).then(result=>{cb(result.location,{title:result.original_name});}).catch(error=>console.error(error));};input.click();},content_css:"/admin/css/editor.css"});function previewPage(){var title=document.getElementById("title").value;var content=tinymce.get("content").getContent();var win=window.open("","_blank","width=1024,height=768");win.document.write(`<!DOCTYPE html><html><head><title>${escapeHtml(title)}</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"></head><body><h1>${escapeHtml(title)}</h1>${content}</body></html>`);win.document.close();}function escapeHtml(text){var div=document.createElement("div");div.appendChild(document.createTextNode(text));return div.innerHTML;}</script></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $is_new ? __("new_page") : __("edit_page") ?></h1><div><button type="button" class="btn btn-sm btn-info" onclick="previewPage()"><i class="bi bi-eye"></i> <?= __("preview") ?></button><a href="content.php" class="btn btn-sm btn-secondary ms-2"><i class="bi bi-arrow-left"></i> <?= __("back") ?></a></div></div><?= $message ?><form method="post"><div class="mb-3"><label class="form-label"><?= __("title") ?> *</label><input type="text" class="form-control" id="title" name="title" value="<?= htmlspecialchars($page["title"]) ?>" required></div><div class="mb-3"><label class="form-label"><?= __("slug") ?></label><input type="text" class="form-control" id="slug" name="slug" value="<?= htmlspecialchars($page["slug"]) ?>"><div class="form-text"><?= __("slug_auto") ?></div></div><div class="mb-3"><label class="form-label"><?= __("content") ?></label><textarea class="form-control" id="content" name="content" rows="10"><?= htmlspecialchars($page["content"]) ?></textarea></div><div class="mb-3"><label class="form-label"><?= __("meta_description") ?></label><textarea class="form-control" id="meta_description" name="meta_description" rows="3"><?= htmlspecialchars($page["meta_description"]) ?></textarea></div><div class="mb-3"><label class="form-label"><?= __("status") ?></label><select class="form-select" name="status"><option value="draft" <?= $page["status"] == "draft" ? "selected" : "" ?>><?= __("draft") ?></option><option value="published" <?= $page["status"] == "published" ? "selected" : "" ?>><?= __("published") ?></option></select></div><div class="mb-3"><label class="form-label"><?= __("template") ?></label><select class="form-select" name="template"><?php foreach($templates as $tpl): ?><option value="<?= $tpl ?>" <?= ($page["template"] ?? "default") == $tpl ? "selected" : "" ?>><?= ucfirst($tpl) ?></option><?php endforeach; ?></select></div><button type="submit" class="btn btn-primary"><?= __("save") ?></button><a href="content.php" class="btn btn-secondary"><?= __("cancel") ?></a></form></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
+<?php require_once __DIR__ . "/../config.php"; require_once "includes/auth.php"; requireLogin(); require_once "includes/content_functions.php"; $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("edit_page"); $id = isset($_GET["id"]) ? (int)$_GET["id"] : 0; $is_new = $id === 0; if($is_new) { $page = ["id"=>0,"title"=>"","slug"=>"","content"=>"","meta_description"=>"","status"=>"draft","template"=>"default"]; } else { $stmt = $pdo->prepare("SELECT * FROM pages WHERE id = ?"); $stmt->execute([$id]); $page = $stmt->fetch(PDO::FETCH_ASSOC); if(!$page) die("Page not found"); } // Предзаполнение из GET-параметров (для AI) if(isset($_GET["prefill_title"])) { $page["title"] = htmlspecialchars($_GET["prefill_title"]); $page["content"] = htmlspecialchars($_GET["prefill_content"] ?? ""); } $message = ""; if($_SERVER["REQUEST_METHOD"] === "POST") { $title = trim($_POST["title"] ?? ""); $slug = trim($_POST["slug"] ?? ""); $content = $_POST["content"] ?? ""; $meta_description = trim($_POST["meta_description"] ?? ""); $status = $_POST["status"] ?? "draft"; $template = $_POST["template"] ?? "default"; $errors = []; if(empty($title)) $errors[] = __("title_required"); if(empty($slug)) $slug = generateSlug($title); $stmt = $pdo->prepare("SELECT id FROM pages WHERE slug = ? AND id != ?"); $stmt->execute([$slug, $id]); if($stmt->fetch()) $errors[] = __("slug_exists"); if(empty($errors)) { if($is_new) { $stmt = $pdo->prepare("INSERT INTO pages (title, slug, content, meta_description, status, template) VALUES (?,?,?,?,?,?)"); $stmt->execute([$title, $slug, $content, $meta_description, $status, $template]); $message = "<div class=\"alert alert-success\">".__("page_created")."</div>"; $id = $pdo->lastInsertId(); $is_new = false; } else { $stmt = $pdo->prepare("UPDATE pages SET title = ?, slug = ?, content = ?, meta_description = ?, status = ?, template = ? WHERE id = ?"); $stmt->execute([$title, $slug, $content, $meta_description, $status, $template, $id]); $message = "<div class=\"alert alert-success\">".__("page_saved")."</div>"; } $stmt = $pdo->prepare("SELECT * FROM pages WHERE id = ?"); $stmt->execute([$id]); $page = $stmt->fetch(PDO::FETCH_ASSOC); } else { $message = "<div class=\"alert alert-danger\"><ul><li>".implode("</li><li>", $errors)."</li></ul></div>"; } } $templates = getPageTemplates(); ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"><script src="/admin/tinymce/tinymce.min.js" referrerpolicy="origin"></script><script>tinymce.init({selector:"#content",height:500,plugins:"advlist anchor autolink autosave code codesample directionality emoticons fullscreen help hr image insertdatetime link lists media nonbreaking pagebreak paste preview print save searchreplace table visualblocks visualchars wordcount",toolbar:"undo redo | styles | bold italic underline strikethrough removeformat | alignleft aligncenter alignright alignjustify | bullist numlist outdent indent | link anchor image media | forecolor backcolor | fontselect fontsizeselect | code codesample | table | hr charmap pagebreak | visualblocks visualchars | fullscreen preview | wordcount save print | searchreplace | help",toolbar_mode:"floating",fontsize_formats:"8pt 10pt 12pt 14pt 16pt 18pt 24pt 36pt",image_title:true,automatic_uploads:true,images_upload_url:"/admin/upload.php",file_picker_types:"image",file_picker_callback:function(cb,value,meta){var input=document.createElement("input");input.setAttribute("type","file");input.setAttribute("accept","image/*");input.onchange=function(){var file=this.files[0];var formData=new FormData();formData.append("file",file);fetch("/admin/upload.php",{method:"POST",body:formData}).then(response=>response.json()).then(result=>{cb(result.location,{title:result.original_name});}).catch(error=>console.error(error));};input.click();},content_css:"/admin/css/editor.css",external_plugins:{"ai_button":"/admin/js/ai_tinymce_plugin.js"}});function previewPage(){var title=document.getElementById("title").value;var content=tinymce.get("content").getContent();var win=window.open("","_blank","width=1024,height=768");win.document.write(`<!DOCTYPE html><html><head><title>${escapeHtml(title)}</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"></head><body><h1>${escapeHtml(title)}</h1>${content}</body></html>`);win.document.close();}function escapeHtml(text){var div=document.createElement("div");div.appendChild(document.createTextNode(text));return div.innerHTML;}</script></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $is_new ? __("new_page") : __("edit_page") ?></h1><div><button type="button" class="btn btn-sm btn-info" onclick="previewPage()"><i class="bi bi-eye"></i> <?= __("preview") ?></button><a href="content.php" class="btn btn-sm btn-secondary ms-2"><i class="bi bi-arrow-left"></i> <?= __("back") ?></a></div></div><?= $message ?><form method="post"><div class="mb-3"><label class="form-label"><?= __("title") ?> *</label><input type="text" class="form-control" id="title" name="title" value="<?= htmlspecialchars($page["title"]) ?>" required></div><div class="mb-3"><label class="form-label"><?= __("slug") ?></label><input type="text" class="form-control" id="slug" name="slug" value="<?= htmlspecialchars($page["slug"]) ?>"><div class="form-text"><?= __("slug_auto") ?></div></div><div class="mb-3"><label class="form-label"><?= __("content") ?></label><textarea class="form-control" id="content" name="content" rows="10"><?= htmlspecialchars($page["content"]) ?></textarea></div><div class="mb-3"><label class="form-label"><?= __("meta_description") ?></label><textarea class="form-control" id="meta_description" name="meta_description" rows="3"><?= htmlspecialchars($page["meta_description"]) ?></textarea></div><div class="mb-3"><label class="form-label"><?= __("status") ?></label><select class="form-select" name="status"><option value="draft" <?= $page["status"] == "draft" ? "selected" : "" ?>><?= __("draft") ?></option><option value="published" <?= $page["status"] == "published" ? "selected" : "" ?>><?= __("published") ?></option></select></div><div class="mb-3"><label class="form-label"><?= __("template") ?></label><select class="form-select" name="template"><?php foreach($templates as $tpl): ?><option value="<?= $tpl ?>" <?= ($page["template"] ?? "default") == $tpl ? "selected" : "" ?>><?= ucfirst($tpl) ?></option><?php endforeach; ?></select></div><button type="submit" class="btn btn-primary"><?= __("save") ?></button><a href="content.php" class="btn btn-secondary"><?= __("cancel") ?></a></form></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
 EDITPAGE
 
 # 6.17 delete_page.php
 create_php_file "$ADMIN_DIR/delete_page.php" '<?php require_once __DIR__ . "/../config.php"; require_once "includes/auth.php"; requireAdmin(); $id = isset($_GET["id"]) ? (int)$_GET["id"] : 0; if($id) { $stmt = $pdo->prepare("DELETE FROM pages WHERE id = ?"); $stmt->execute([$id]); } header("Location: content.php"); exit;'
 
-# 6.18 edit_file.php
+# 6.18 edit_file.php (с поддержкой AI-плагина, без кнопки импорта)
 create_php_file "$ADMIN_DIR/edit_file.php" <<'EDITFILE'
-<?php require_once __DIR__ . "/../config.php"; require_once "includes/auth.php"; requireLogin(); require_once "includes/content_functions.php"; $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("edit_file"); $root_dir = __DIR__ . "/../"; $file_name = isset($_GET["file"]) ? basename($_GET["file"]) : ""; $file_path = $root_dir . $file_name; $message = ""; if($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save_file"])) { $content = $_POST["content"]; if(is_writable($file_path)) { $backup = $file_path . ".bak." . date("Ymd_His"); copy($file_path, $backup); if(file_put_contents($file_path, $content) !== false) $message = "<div class=\"alert alert-success\">".__("file_saved")." ".basename($backup)."</div>"; else $message = "<div class=\"alert alert-danger\">".__("error")."</div>"; } else $message = "<div class=\"alert alert-danger\">".__("file_not_writable")."</div>"; } $content = ""; $is_html = false; $has_code = false; if($file_name && file_exists($file_path) && is_readable($file_path)) { $content = file_get_contents($file_path); $ext = pathinfo($file_name, PATHINFO_EXTENSION); $is_html = in_array($ext, ["html","htm","php","phtml","inc"]); if($is_html) $has_code = preg_match("/<(style|script)/i", $content) ? true : false; } ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"><?php if($is_html && $file_name): ?><script src="/admin/tinymce/tinymce.min.js" referrerpolicy="origin"></script><script>tinymce.init({selector:"#content",height:500,plugins:"advlist anchor autolink autosave code codesample directionality emoticons fullscreen help hr image insertdatetime link lists media nonbreaking pagebreak paste preview print save searchreplace table visualblocks visualchars wordcount",toolbar:"undo redo | styles | bold italic underline strikethrough removeformat | alignleft aligncenter alignright alignjustify | bullist numlist outdent indent | link anchor image media | forecolor backcolor | fontselect fontsizeselect | code codesample | table | hr charmap pagebreak | visualblocks visualchars | fullscreen preview | wordcount save print | searchreplace | help",toolbar_mode:"floating",fontsize_formats:"8pt 10pt 12pt 14pt 16pt 18pt 24pt 36pt",image_title:true,automatic_uploads:true,images_upload_url:"/admin/upload.php",file_picker_types:"image",file_picker_callback:function(cb,value,meta){var input=document.createElement("input");input.setAttribute("type","file");input.setAttribute("accept","image/*");input.onchange=function(){var file=this.files[0];var formData=new FormData();formData.append("file",file);fetch("/admin/upload.php",{method:"POST",body:formData}).then(response=>response.json()).then(result=>{cb(result.location,{title:result.original_name});}).catch(error=>console.error(error));};input.click();},content_css:"/admin/css/editor.css"});function previewFile(){var content;if(typeof tinymce !== "undefined" && tinymce.get("content")) content = tinymce.get("content").getContent(); else content = document.getElementById("content").value; var win = window.open("","_blank","width=1024,height=768"); win.document.write(content); win.document.close(); }</script><?php endif; ?></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1><a href="content.php" class="btn btn-sm btn-secondary"><i class="bi bi-arrow-left"></i> <?= __("back") ?></a></div><?= $message ?><?php if($has_code): ?><div class="alert alert-warning"><i class="bi bi-exclamation-triangle"></i> <?= __("code_warning") ?></div><?php endif; ?><?php if($file_name): ?><form method="post"><div class="mb-3"><label class="form-label"><?= __("editing") ?>: <?= htmlspecialchars($file_name) ?></label><?php if($is_html): ?><textarea id="content" name="content" style="height:500px;"><?= htmlspecialchars($content) ?></textarea><?php else: ?><textarea name="content" class="form-control" rows="20"><?= htmlspecialchars($content) ?></textarea><?php endif; ?></div><button type="submit" name="save_file" class="btn btn-primary"><?= __("save") ?></button><button type="button" class="btn btn-info" onclick="previewFile()"><i class="bi bi-eye"></i> <?= __("preview") ?></button><a href="content.php" class="btn btn-secondary"><?= __("cancel") ?></a></form><?php else: ?><div class="alert alert-danger"><?= __("file_not_found") ?></div><?php endif; ?></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
+<?php require_once __DIR__ . "/../config.php"; require_once "includes/auth.php"; requireLogin(); require_once "includes/content_functions.php"; $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("edit_file"); $root_dir = __DIR__ . "/../"; $file_name = isset($_GET["file"]) ? basename($_GET["file"]) : ""; $file_path = $root_dir . $file_name; $message = ""; if($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save_file"])) { $content = $_POST["content"]; if(is_writable($file_path)) { $backup = $file_path . ".bak." . date("Ymd_His"); copy($file_path, $backup); if(file_put_contents($file_path, $content) !== false) $message = "<div class=\"alert alert-success\">".__("file_saved")." ".basename($backup)."</div>"; else $message = "<div class=\"alert alert-danger\">".__("error")."</div>"; } else $message = "<div class=\"alert alert-danger\">".__("file_not_writable")."</div>"; } $content = ""; $is_html = false; $has_code = false; if($file_name && file_exists($file_path) && is_readable($file_path)) { $content = file_get_contents($file_path); $ext = pathinfo($file_name, PATHINFO_EXTENSION); $is_html = in_array($ext, ["html","htm","php","phtml","inc"]); if($is_html) $has_code = preg_match("/<(style|script)/i", $content) ? true : false; } ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"><?php if($is_html && $file_name): ?><script src="/admin/tinymce/tinymce.min.js" referrerpolicy="origin"></script><script>tinymce.init({selector:"#content",height:500,plugins:"advlist anchor autolink autosave code codesample directionality emoticons fullscreen help hr image insertdatetime link lists media nonbreaking pagebreak paste preview print save searchreplace table visualblocks visualchars wordcount",toolbar:"undo redo | styles | bold italic underline strikethrough removeformat | alignleft aligncenter alignright alignjustify | bullist numlist outdent indent | link anchor image media | forecolor backcolor | fontselect fontsizeselect | code codesample | table | hr charmap pagebreak | visualblocks visualchars | fullscreen preview | wordcount save print | searchreplace | help",toolbar_mode:"floating",fontsize_formats:"8pt 10pt 12pt 14pt 16pt 18pt 24pt 36pt",image_title:true,automatic_uploads:true,images_upload_url:"/admin/upload.php",file_picker_types:"image",file_picker_callback:function(cb,value,meta){var input=document.createElement("input");input.setAttribute("type","file");input.setAttribute("accept","image/*");input.onchange=function(){var file=this.files[0];var formData=new FormData();formData.append("file",file);fetch("/admin/upload.php",{method:"POST",body:formData}).then(response=>response.json()).then(result=>{cb(result.location,{title:result.original_name});}).catch(error=>console.error(error));};input.click();},content_css:"/admin/css/editor.css",external_plugins:{"ai_button":"/admin/js/ai_tinymce_plugin.js"}});function previewFile(){var content;if(typeof tinymce !== "undefined" && tinymce.get("content")) content = tinymce.get("content").getContent(); else content = document.getElementById("content").value; var win = window.open("","_blank","width=1024,height=768"); win.document.write(content); win.document.close(); }</script><?php endif; ?></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1><a href="content.php" class="btn btn-sm btn-secondary"><i class="bi bi-arrow-left"></i> <?= __("back") ?></a></div><?= $message ?><?php if($has_code): ?><div class="alert alert-warning"><i class="bi bi-exclamation-triangle"></i> <?= __("code_warning") ?></div><?php endif; ?><?php if($file_name): ?><form method="post"><div class="mb-3"><label class="form-label"><?= __("editing") ?>: <?= htmlspecialchars($file_name) ?></label><?php if($is_html): ?><textarea id="content" name="content" style="height:500px;"><?= htmlspecialchars($content) ?></textarea><?php else: ?><textarea name="content" class="form-control" rows="20"><?= htmlspecialchars($content) ?></textarea><?php endif; ?></div><button type="submit" name="save_file" class="btn btn-primary"><?= __("save") ?></button><button type="button" class="btn btn-info" onclick="previewFile()"><i class="bi bi-eye"></i> <?= __("preview") ?></button><a href="content.php" class="btn btn-secondary"><?= __("cancel") ?></a></form><?php else: ?><div class="alert alert-danger"><?= __("file_not_found") ?></div><?php endif; ?></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
 EDITFILE
 
-# 6.19 import_to_db.php
-create_php_file "$ADMIN_DIR/import_to_db.php" '<?php require_once __DIR__ . "/../config.php"; require_once "includes/auth.php"; requireLogin(); $file_name = isset($_GET["file"]) ? basename($_GET["file"]) : ""; if(!$file_name) { header("Location: content.php"); exit; } $file_path = __DIR__ . "/../" . $file_name; if(!file_exists($file_path)) { $_SESSION["message"] = __("file_not_found"); header("Location: content.php"); exit; } $content = file_get_contents($file_path); $title = pathinfo($file_name, PATHINFO_FILENAME); $slug = $title === "index" ? "index" : $title; $stmt = $pdo->prepare("SELECT id FROM pages WHERE slug = ?"); $stmt->execute([$slug]); if($stmt->fetch()) { $_SESSION["message"] = __("slug_exists"); header("Location: content.php"); exit; } $stmt = $pdo->prepare("INSERT INTO pages (title, slug, content, status, template) VALUES (?, ?, ?, \"published\", \"default\")"); $stmt->execute([$title, $slug, $content]); $new_id = $pdo->lastInsertId(); if($file_name === "index.html" || $file_name === "index.php") unlink($file_path); header("Location: edit_page.php?id=$new_id");'
-
-# 6.20 upload.php
+# 6.19 upload.php
 create_php_file "$ADMIN_DIR/upload.php" <<'UPLOAD'
 <?php require_once __DIR__ . "/../config.php"; require_once "includes/auth.php"; requireLogin(); $response = ["error"=>true,"message"=>""]; if($_SERVER["REQUEST_METHOD"] !== "POST") { $response["message"] = "Method not allowed"; header("Content-Type: application/json"); echo json_encode($response); exit; } if(empty($_FILES["file"])) { $response["message"] = "No file"; header("Content-Type: application/json"); echo json_encode($response); exit; } $file = $_FILES["file"]; $original_name = $file["name"]; $tmp_name = $file["tmp_name"]; $size = $file["size"]; $error = $file["error"]; if($error !== UPLOAD_ERR_OK) { $response["message"] = "Upload error code $error"; header("Content-Type: application/json"); echo json_encode($response); exit; } $allowed_mimes = ["image/jpeg","image/png","image/gif","image/webp","application/pdf","text/plain","application/msword","application/vnd.openxmlformats-officedocument.wordprocessingml.document"]; $finfo = finfo_open(FILEINFO_MIME_TYPE); $mime_type = finfo_file($finfo, $tmp_name); finfo_close($finfo); if(!in_array($mime_type, $allowed_mimes)) { $response["message"] = "Invalid file type: $mime_type"; header("Content-Type: application/json"); echo json_encode($response); exit; } $max_size = getSetting("max_upload_size", 10*1024*1024); if($size > $max_size) { $response["message"] = "File exceeds max size"; header("Content-Type: application/json"); echo json_encode($response); exit; } $upload_dir = __DIR__ . "/../uploads/"; if(!is_dir($upload_dir)) mkdir($upload_dir, 0750, true); $year = date("Y"); $month = date("m"); $target_dir = $upload_dir . $year . "/" . $month . "/"; if(!is_dir($target_dir)) mkdir($target_dir, 0750, true); $ext = pathinfo($original_name, PATHINFO_EXTENSION); $new_name = uniqid() . "." . $ext; $target_path = $target_dir . $new_name; if(!move_uploaded_file($tmp_name, $target_path)) { $response["message"] = "Failed to save file"; header("Content-Type: application/json"); echo json_encode($response); exit; } $relative_path = "/uploads/" . $year . "/" . $month . "/" . $new_name; $stmt = $pdo->prepare("INSERT INTO files (original_name, path, size, type, uploaded_by) VALUES (?,?,?,?,?)"); $stmt->execute([$original_name, $relative_path, $size, $mime_type, $_SESSION["user_id"]]); $response = ["error"=>false,"location"=>$relative_path,"original_name"=>$original_name,"id"=>$pdo->lastInsertId()]; header("Content-Type: application/json"); echo json_encode($response);
 UPLOAD
 
-# 6.21 files.php
+# 6.20 files.php
 create_php_file "$ADMIN_DIR/files.php" <<'FILES'
 <?php require_once __DIR__ . "/../config.php"; require_once "includes/auth.php"; requireLogin(); $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("files"); $message = ""; $search = trim($_GET["search"] ?? ""); $order_by = $_GET["order_by"] ?? "id"; $order_dir = strtoupper($_GET["order_dir"] ?? "DESC"); $allowed_order = ["id","original_name","type","size","uploaded_at"]; if(!in_array($order_by, $allowed_order)) $order_by = "id"; $order_dir = ($order_dir === "ASC") ? "ASC" : "DESC"; if($_SERVER["REQUEST_METHOD"] === "POST" && isset($_FILES["file"])) { $file = $_FILES["file"]; $original_name = $file["name"]; $tmp_name = $file["tmp_name"]; $size = $file["size"]; $error = $file["error"]; if($error !== UPLOAD_ERR_OK) $message = "<div class=\"alert alert-danger\">Upload error</div>"; else { $allowed_mimes = ["image/jpeg","image/png","image/gif","image/webp","application/pdf","text/plain","application/msword","application/vnd.openxmlformats-officedocument.wordprocessingml.document"]; $finfo = finfo_open(FILEINFO_MIME_TYPE); $mime_type = finfo_file($finfo, $tmp_name); finfo_close($finfo); if(!in_array($mime_type, $allowed_mimes)) $message = "<div class=\"alert alert-danger\">Invalid file type</div>"; else { $max_size = getSetting("max_upload_size", 10*1024*1024); if($size > $max_size) $message = "<div class=\"alert alert-danger\">File too large</div>"; else { $upload_dir = __DIR__ . "/../uploads/"; if(!is_dir($upload_dir)) mkdir($upload_dir, 0750, true); $year = date("Y"); $month = date("m"); $target_dir = $upload_dir . $year . "/" . $month . "/"; if(!is_dir($target_dir)) mkdir($target_dir, 0750, true); $ext = pathinfo($original_name, PATHINFO_EXTENSION); $new_name = uniqid() . "." . $ext; $target_path = $target_dir . $new_name; if(move_uploaded_file($tmp_name, $target_path)) { $relative_path = "/uploads/" . $year . "/" . $month . "/" . $new_name; $stmt = $pdo->prepare("INSERT INTO files (original_name, path, size, type, uploaded_by) VALUES (?,?,?,?,?)"); $stmt->execute([$original_name, $relative_path, $size, $mime_type, $_SESSION["user_id"]]); $message = "<div class=\"alert alert-success\">".__("file_uploaded")."</div>"; } else $message = "<div class=\"alert alert-danger\">Failed to save</div>"; } } } } if(isset($_GET["delete"])) { $id = (int)$_GET["delete"]; $stmt = $pdo->prepare("SELECT path FROM files WHERE id = ?"); $stmt->execute([$id]); $file = $stmt->fetch(PDO::FETCH_ASSOC); if($file) { $full_path = __DIR__ . "/.." . $file["path"]; if(file_exists($full_path)) unlink($full_path); $stmt = $pdo->prepare("DELETE FROM files WHERE id = ?"); $stmt->execute([$id]); $message = "<div class=\"alert alert-success\">".__("file_deleted")."</div>"; } else $message = "<div class=\"alert alert-danger\">".__("file_not_found")."</div>"; } $sql = "SELECT * FROM files WHERE 1=1"; $params = []; if($search) { $sql .= " AND original_name LIKE :search"; $params[":search"] = "%$search%"; } $sql .= " ORDER BY $order_by $order_dir"; $stmt = $pdo->prepare($sql); $stmt->execute($params); $files = $stmt->fetchAll(PDO::FETCH_ASSOC); function sort_link($field, $current_field, $current_dir) { $new_dir = ($current_field == $field && $current_dir == "DESC") ? "ASC" : "DESC"; $params = $_GET; $params["order_by"] = $field; $params["order_dir"] = $new_dir; unset($params["delete"]); $query = http_build_query($params); return "?$query"; } ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1><button type="button" class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#uploadModal"><i class="bi bi-upload"></i> <?= __("upload_file") ?></button></div><form method="get" class="row g-3 mb-4"><div class="col-auto"><input type="text" class="form-control" name="search" placeholder="<?= __("search") ?>" value="<?= htmlspecialchars($search) ?>"></div><div class="col-auto"><button type="submit" class="btn btn-primary"><?= __("filter") ?></button><a href="files.php" class="btn btn-secondary"><?= __("reset") ?></a></div></form><?= $message ?><div class="table-responsive"><table class="table table-striped"><thead><tr><th><a href="<?= sort_link("id", $order_by, $order_dir) ?>">ID</a></th><th><a href="<?= sort_link("original_name", $order_by, $order_dir) ?>"><?= __("original_name") ?></a></th><th><?= __("path") ?></th><th><a href="<?= sort_link("type", $order_by, $order_dir) ?>"><?= __("type") ?></a></th><th><a href="<?= sort_link("size", $order_by, $order_dir) ?>"><?= __("size") ?> (KB)</a></th><th><a href="<?= sort_link("uploaded_at", $order_by, $order_dir) ?>"><?= __("uploaded_at") ?></a></th><th><?= __("actions") ?></th></tr></thead><tbody><?php foreach($files as $file): ?><tr><td><?= $file["id"] ?></td><td><?= htmlspecialchars($file["original_name"]) ?></td><td><a href="<?= htmlspecialchars($file["path"]) ?>" target="_blank"><?= htmlspecialchars($file["path"]) ?></a></td><td><?= htmlspecialchars($file["type"]) ?></td><td><?= round($file["size"] / 1024, 2) ?></td><td><?= $file["uploaded_at"] ?></td><td><a href="?delete=<?= $file["id"] ?>&<?= http_build_query(array_diff_key($_GET, ["delete"=>1])) ?>" class="btn btn-sm btn-danger" onclick="return confirm(\'<?= __("confirm_delete") ?>\')"><i class="bi bi-trash"></i></a></td></tr><?php endforeach; ?></tbody></table></div></main></div></div><div class="modal fade" id="uploadModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><form method="post" enctype="multipart/form-data"><div class="modal-header"><h5 class="modal-title"><?= __("upload_file") ?></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-3"><label class="form-label"><?= __("select_file") ?></label><input type="file" class="form-control" name="file" required></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><?= __("cancel") ?></button><button type="submit" class="btn btn-primary"><?= __("upload") ?></button></div></form></div></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
 FILES
 
-# 6.22 file-list.php
+# 6.21 file-list.php
 create_php_file "$ADMIN_DIR/file-list.php" '<?php require_once __DIR__ . "/../config.php"; require_once "includes/auth.php"; requireLogin(); $stmt = $pdo->query("SELECT id, original_name, path, type, size, uploaded_at FROM files ORDER BY uploaded_at DESC"); $files = $stmt->fetchAll(PDO::FETCH_ASSOC); header("Content-Type: application/json"); echo json_encode($files);'
 
-# 6.23 file-picker.html
+# 6.22 file-picker.html
 cat > "$ADMIN_DIR/file-picker.html" <<'PICKER'
 <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Выбор файла</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><style>.file-item{cursor:pointer}.file-item:hover{background:#f0f0f0}.thumbnail{width:100px;height:auto;max-height:100px;object-fit:cover;margin-right:15px}</style></head><body><div class="container"><h2>Выберите файл</h2><div id="file-list" class="list-group"><div class="text-center"><div class="spinner-border"></div></div></div></div><script>function escapeHtml(str){return str.replace(/[&<>]/g,function(m){if(m==="&") return "&amp;"; if(m==="<") return "&lt;"; if(m===">") return "&gt;"; return m;});}fetch("/admin/file-list.php").then(r=>r.json()).then(files=>{const c=document.getElementById("file-list");c.innerHTML="";if(files.length===0){c.innerHTML="<div class=\"alert alert-info\">Нет загруженных файлов</div>";return;}files.forEach(f=>{const d=document.createElement("div");d.className="list-group-item file-item";d.innerHTML=`<div class="row align-items-center"><div class="col-auto"><img src="${escapeHtml(f.path)}" class="thumbnail" onerror="this.style.display='none'"></div><div class="col"><strong>${escapeHtml(f.original_name)}</strong><br><small>${escapeHtml(f.type)} | ${(f.size/1024).toFixed(2)} KB</small><br><small>Загружен: ${escapeHtml(f.uploaded_at)}</small></div></div>`;d.addEventListener("click",()=>{window.parent.postMessage({mceAction:"FileSelected",url:f.path,title:f.original_name},"*");window.close();});c.appendChild(d);});}).catch(e=>{console.error(e);document.getElementById("file-list").innerHTML="<div class=\"alert alert-danger\">Ошибка</div>";});</script></body></html>
 PICKER
 
-# 6.24 analytics.php
+# 6.23 analytics.php
 create_php_file "$ADMIN_DIR/analytics.php" <<'ANALYTICS'
 <?php
 require_once "includes/auth.php";
@@ -1067,7 +1104,340 @@ foreach (glob($root_dir . "*") as $item) {
 </html>
 ANALYTICS
 
-log_only "Все файлы админ-панели созданы."
+# 6.24 ai_generator.php
+create_php_file "$ADMIN_DIR/ai_generator.php" <<'AIGEN'
+<?php
+require_once __DIR__ . "/includes/auth.php";
+requireLogin();
+$site_name = getSetting("site_name", SITE_NAME);
+$pageTitle = __("ai_generator");
+
+$api_key = getSetting("deepseek_api_key", "");
+$model = getSetting("deepseek_model", "deepseek-chat");
+$max_tokens = (int)getSetting("deepseek_max_tokens", 2000);
+
+$generated_text = "";
+$error = "";
+$prompt = "";
+
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["prompt"])) {
+    $prompt = trim($_POST["prompt"]);
+    if (empty($prompt)) {
+        $error = "Промпт не может быть пустым";
+    } elseif (empty($api_key)) {
+        $error = "API ключ DeepSeek не настроен. Перейдите в Настройки и добавьте ключ.";
+    } else {
+        $ch = curl_init("https://api.deepseek.com/v1/chat/completions");
+        $data = [
+            "model" => $model,
+            "messages" => [
+                ["role" => "user", "content" => $prompt]
+            ],
+            "max_tokens" => $max_tokens,
+            "temperature" => 0.7
+        ];
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            "Content-Type: application/json",
+            "Authorization: Bearer $api_key"
+        ]);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($http_code === 200) {
+            $result = json_decode($response, true);
+            $generated_text = $result["choices"][0]["message"]["content"] ?? "";
+            $stmt = $pdo->prepare("INSERT INTO ai_requests (prompt, response, user_id) VALUES (?, ?, ?)");
+            $stmt->execute([$prompt, $generated_text, $_SESSION["user_id"]]);
+        } else {
+            $error = "Ошибка API: HTTP $http_code. " . ($response ?: "Нет ответа");
+        }
+    }
+}
+?>
+<!DOCTYPE html>
+<html lang="<?= currentLanguage() ?>">
+<head>
+    <meta charset="UTF-8">
+    <title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="/admin/css/admin.css">
+</head>
+<body class="theme-<?= getSetting("admin_theme", "light") ?>">
+    <?php include "includes/header.php"; ?>
+    <div class="container-fluid">
+        <div class="row">
+            <?php include "includes/sidebar.php"; ?>
+            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
+                <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+                    <h1 class="h2"><?= $pageTitle ?></h1>
+                </div>
+                
+                <form method="post" class="mb-4">
+                    <div class="mb-3">
+                        <label for="prompt" class="form-label">Промпт (запрос к AI)</label>
+                        <textarea class="form-control" id="prompt" name="prompt" rows="4" required><?= htmlspecialchars($prompt) ?></textarea>
+                    </div>
+                    <button type="submit" class="btn btn-primary"><i class="bi bi-send"></i> Отправить</button>
+                </form>
+                
+                <?php if ($error): ?>
+                    <div class="alert alert-danger"><?= htmlspecialchars($error) ?></div>
+                <?php endif; ?>
+                
+                <?php if ($generated_text): ?>
+                <div class="card mt-4">
+                    <div class="card-header">
+                        <i class="bi bi-robot"></i> Результат генерации
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label class="form-label">Заголовок для страницы</label>
+                            <input type="text" id="generated_title" class="form-control" placeholder="Введите заголовок">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Содержимое (HTML)</label>
+                            <div id="generated_text" class="border p-3 bg-light" style="max-height: 400px; overflow: auto;"><?= nl2br(htmlspecialchars($generated_text)) ?></div>
+                        </div>
+                        <button class="btn btn-success" onclick="createPage()"><i class="bi bi-file-earmark-plus"></i> Создать страницу</button>
+                        <button class="btn btn-info" onclick="insertToEditor()"><i class="bi bi-pencil-square"></i> Вставить в редактор</button>
+                        <p class="mt-2 text-muted small">Примечание: кнопка «Создать страницу» создаст пустую страницу, содержимое нужно будет вставить вручную.</p>
+                    </div>
+                </div>
+                <?php endif; ?>
+                
+                <div class="mt-4">
+                    <a href="ai_history.php" class="btn btn-secondary"><i class="bi bi-clock-history"></i> История запросов</a>
+                </div>
+            </main>
+        </div>
+    </div>
+    <script>
+    function insertToEditor() {
+        if (!window.opener || !window.opener.tinymce) {
+            alert("Эта функция работает только при вызове из редактора TinyMCE");
+            return;
+        }
+        var text = document.getElementById("generated_text").innerText;
+        var editor = window.opener.tinymce.activeEditor;
+        if (editor) {
+            editor.insertContent(text);
+            window.close();
+        } else {
+            alert("Редактор не найден");
+        }
+    }
+    function createPage() {
+        var title = document.getElementById("generated_title").value;
+        var content = document.getElementById("generated_text").innerText;
+        if (!title) title = "Новая страница";
+        var url = "/admin/edit_page.php?prefill_title=" + encodeURIComponent(title) + "&prefill_content=" + encodeURIComponent(content);
+        window.open(url, "_blank");
+    }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+AIGEN
+
+# 6.25 ai_history.php
+create_php_file "$ADMIN_DIR/ai_history.php" <<'AIHIST'
+<?php
+require_once __DIR__ . "/includes/auth.php";
+requireAdmin();
+$site_name = getSetting("site_name", SITE_NAME);
+$pageTitle = __("ai_history");
+
+$page = isset($_GET["page"]) ? max(1, (int)$_GET["page"]) : 1;
+$per_page = 20;
+$offset = ($page - 1) * $per_page;
+
+$total = $pdo->query("SELECT COUNT(*) FROM ai_requests")->fetchColumn();
+$stmt = $pdo->prepare("SELECT r.*, u.login FROM ai_requests r JOIN users u ON r.user_id = u.id ORDER BY r.created_at DESC LIMIT :limit OFFSET :offset");
+$stmt->bindValue(":limit", $per_page, PDO::PARAM_INT);
+$stmt->bindValue(":offset", $offset, PDO::PARAM_INT);
+$stmt->execute();
+$requests = $stmt->fetchAll(PDO::FETCH_ASSOC);
+?>
+<!DOCTYPE html>
+<html lang="<?= currentLanguage() ?>">
+<head>
+    <meta charset="UTF-8">
+    <title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="/admin/css/admin.css">
+</head>
+<body class="theme-<?= getSetting("admin_theme", "light") ?>">
+    <?php include "includes/header.php"; ?>
+    <div class="container-fluid">
+        <div class="row">
+            <?php include "includes/sidebar.php"; ?>
+            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
+                <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+                    <h1 class="h2"><?= $pageTitle ?></h1>
+                    <a href="ai_generator.php" class="btn btn-primary"><i class="bi bi-plus"></i> Новый запрос</a>
+                </div>
+                
+                <div class="table-responsive">
+                    <table class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Пользователь</th>
+                                <th>Промпт</th>
+                                <th>Дата</th>
+                                <th>Действия</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($requests as $req): ?>
+                            <tr>
+                                <td><?= $req["id"] ?></td>
+                                <td><?= htmlspecialchars($req["login"]) ?></td>
+                                <td><?= htmlspecialchars(mb_substr($req["prompt"], 0, 100)) ?>…</td>
+                                <td><?= $req["created_at"] ?></td>
+                                <td>
+                                    <button class="btn btn-sm btn-info" data-bs-toggle="modal" data-bs-target="#modal_<?= $req["id"] ?>"><i class="bi bi-eye"></i></button>
+                                </td>
+                            </tr>
+                            <div class="modal fade" id="modal_<?= $req["id"] ?>" tabindex="-1">
+                                <div class="modal-dialog modal-lg">
+                                    <div class="modal-content">
+                                        <div class="modal-header">
+                                            <h5 class="modal-title">Запрос #<?= $req["id"] ?></h5>
+                                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                                        </div>
+                                        <div class="modal-body">
+                                            <h6>Промпт:</h6>
+                                            <p><?= nl2br(htmlspecialchars($req["prompt"])) ?></p>
+                                            <h6>Ответ AI:</h6>
+                                            <div><?= nl2br(htmlspecialchars($req["response"])) ?></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+                
+                <?php if ($total > $per_page): ?>
+                <nav>
+                    <ul class="pagination">
+                        <?php for ($i = 1; $i <= ceil($total / $per_page); $i++): ?>
+                            <li class="page-item <?= $i == $page ? "active" : "" ?>">
+                                <a class="page-link" href="?page=<?= $i ?>"><?= $i ?></a>
+                            </li>
+                        <?php endfor; ?>
+                    </ul>
+                </nav>
+                <?php endif; ?>
+            </main>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+AIHIST
+
+# 6.26 ai_api.php
+create_php_file "$ADMIN_DIR/ai_api.php" <<'AIPHP'
+<?php
+require_once __DIR__ . "/../config.php";
+require_once "includes/functions.php";
+require_once "includes/auth.php";
+requireLogin();
+header("Content-Type: application/json");
+
+if ($_SERVER["REQUEST_METHOD"] !== "POST") {
+    http_response_code(405);
+    echo json_encode(["error" => "Method not allowed"]);
+    exit;
+}
+
+$prompt = trim($_POST["prompt"] ?? "");
+if (empty($prompt)) {
+    echo json_encode(["error" => "Промпт не может быть пустым"]);
+    exit;
+}
+
+$api_key = getSetting("deepseek_api_key", "");
+if (empty($api_key)) {
+    echo json_encode(["error" => "API ключ DeepSeek не настроен"]);
+    exit;
+}
+
+$model = getSetting("deepseek_model", "deepseek-chat");
+$max_tokens = (int)getSetting("deepseek_max_tokens", 2000);
+
+$ch = curl_init("https://api.deepseek.com/v1/chat/completions");
+$data = [
+    "model" => $model,
+    "messages" => [["role" => "user", "content" => $prompt]],
+    "max_tokens" => $max_tokens,
+    "temperature" => 0.7
+];
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch, CURLOPT_POST, true);
+curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+curl_setopt($ch, CURLOPT_HTTPHEADER, [
+    "Content-Type: application/json",
+    "Authorization: Bearer $api_key"
+]);
+curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+$response = curl_exec($ch);
+$http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+
+if ($http_code === 200) {
+    $result = json_decode($response, true);
+    $generated_text = $result["choices"][0]["message"]["content"] ?? "";
+    $stmt = $pdo->prepare("INSERT INTO ai_requests (prompt, response, user_id) VALUES (?, ?, ?)");
+    $stmt->execute([$prompt, $generated_text, $_SESSION["user_id"]]);
+    echo json_encode(["response" => $generated_text]);
+} else {
+    echo json_encode(["error" => "Ошибка API: HTTP $http_code"]);
+}
+AIPHP
+
+# 6.27 ai_tinymce_plugin.js
+mkdir -p "$ADMIN_DIR/js"
+cat > "$ADMIN_DIR/js/ai_tinymce_plugin.js" <<'JSPLUGIN'
+tinymce.PluginManager.add('ai_button', function(editor, url) {
+    editor.ui.registry.addButton('ai_button', {
+        text: 'AI',
+        tooltip: 'Generate with DeepSeek',
+        icon: 'robot',
+        onAction: function() {
+            var prompt = prompt("Введите запрос для AI:");
+            if (prompt) {
+                fetch("/admin/ai_api.php", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    body: "prompt=" + encodeURIComponent(prompt)
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.response) {
+                        editor.insertContent(data.response);
+                    } else if (data.error) {
+                        alert(data.error);
+                    }
+                })
+                .catch(err => alert("Ошибка: " + err));
+            }
+        }
+    });
+});
+JSPLUGIN
+
+log_only "Все файлы админ-панели (включая AI) созданы."
 
 # ----------------------------------------------------------------------
 # 7. CSS-файл
@@ -1155,7 +1525,6 @@ echo "<h1>404 - Page not found</h1>";
 # ----------------------------------------------------------------------
 next_step "Интеграция трекера посещений"
 
-# Создаём track.php для JS-трекера (всегда, если его нет)
 if [[ ! -f "$SITE_DIR/track.php" ]] || $FORCE_MODE; then
     cat > "$SITE_DIR/track.php" <<'TRACKPHP'
 <?php
@@ -1178,7 +1547,6 @@ TRACKPHP
     log_only "track.php создан."
 fi
 
-# Создаём JS-трекер (всегда, если его нет)
 mkdir -p "$SITE_DIR/js"
 if [[ ! -f "$SITE_DIR/js/tracker.js" ]] || $FORCE_MODE; then
     cat > "$SITE_DIR/js/tracker.js" <<'JSCODE'
@@ -1202,7 +1570,6 @@ JSCODE
     log_only "JS-трекер создан."
 fi
 
-# PHP-трекер
 TRACKER_PHP='<?php
 if (isset($pdo) && strpos($_SERVER["REQUEST_URI"], "/admin") !== 0) {
     try {
@@ -1215,7 +1582,6 @@ if (isset($pdo) && strpos($_SERVER["REQUEST_URI"], "/admin") !== 0) {
 }
 ?>'
 INDEX_FILE="$SITE_DIR/index.php"
-# Проверяем, существует ли index.php или index.html
 if [[ -f "$INDEX_FILE" ]] || [[ -f "$SITE_DIR/index.html" ]]; then
     if [[ -f "$INDEX_FILE" ]]; then
         if ! grep -q "INSERT INTO visits" "$INDEX_FILE"; then
@@ -1234,7 +1600,6 @@ if [[ -f "$INDEX_FILE" ]] || [[ -f "$SITE_DIR/index.html" ]]; then
         log "${YELLOW}Файл index.html найден, но не index.php. JS-трекер будет добавлен через analytics.php.${NC}"
     fi
 else
-    # Нет ни index.php, ни index.html – создаём новый index.php с трекером и роутером
     cat > "$INDEX_FILE" <<EOF
 <?php
 require_once __DIR__ . "/config.php";
@@ -1368,13 +1733,23 @@ fi
 
 echo ""
 log "${GREEN}======================================================"
-log "${GREEN}✅ CMS и сайт успешно установлены!${NC}"
+log "${GREEN}✅ CMS и AI полностью установлены!${NC}"
 log "${GREEN}======================================================"
 echo ""
 log "🌐 Сайт доступен по адресу: ${PROTOCOL}://${DOMAIN}"
 log "🔐 Админ-панель: ${PROTOCOL}://${DOMAIN}/admin"
 log "   Логин: admin"
 log "   Пароль: ${ADMIN_PASSWORD}"
+echo ""
+log "🤖 AI-функционал:"
+log "   - Генератор контента: ${PROTOCOL}://${DOMAIN}/admin/ai_generator.php"
+log "   - История запросов: ${PROTOCOL}://${DOMAIN}/admin/ai_history.php"
+log "   - Кнопка AI в редакторе TinyMCE (при создании/редактировании страниц)"
+echo ""
+log "🔧 Для работы AI необходимо:"
+log "   1. Зарегистрироваться на platform.deepseek.com"
+log "   2. Получить API ключ"
+log "   3. В админ-панели перейти в Настройки → ввести API ключ, выбрать модель, сохранить."
 echo ""
 log "${YELLOW}📁 Если у вас есть готовые файлы сайта (index.html, стили, изображения):${NC}"
 log "   Разместите их в директории: ${SITE_DIR}"
