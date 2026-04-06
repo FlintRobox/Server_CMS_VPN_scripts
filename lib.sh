@@ -71,8 +71,13 @@ create_php_file() {
     
     mkdir -p "$(dirname "$file")"
     
-    # Читаем весь stdin и записываем в файл
-    cat > "$file"
+    # Если передан второй аргумент – записываем его, иначе читаем stdin
+    if [[ $# -ge 2 ]]; then
+        printf '%s' "$2" > "$file"
+    else
+        cat > "$file"
+    fi
+    
     log_only "Файл $file создан/обновлён."
     
     if [[ "$file" == *.php ]]; then
