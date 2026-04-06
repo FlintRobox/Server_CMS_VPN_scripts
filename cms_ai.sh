@@ -1,9 +1,9 @@
 #!/bin/bash
 # =====================================================================
 # ai.sh - Интеграция AI DeepSeek в админ-панель CMS
-# Версия: 1.0
+# Версия: 2.0 (безопасная, без повреждения файлов админки)
 # Добавляет раздел генерации контента, историю запросов,
-# кнопку в TinyMCE, настройки API ключа.
+# кнопку в TinyMCE через отдельный плагин, настройки API ключа.
 # =====================================================================
 
 set -euo pipefail
@@ -44,8 +44,9 @@ TOTAL_STEPS=8
 CURRENT_STEP=0
 
 next_step() {
-    CURRENT_STEP=$((CURRENT_STEP + 1))
-    show_progress $CURRENT_STEP $TOTAL_STEPS "$1"
+    CURRENT_STEP=$((CURRENT_STEPS + 1))
+    local percent=$(( CURRENT_STEP * 100 / TOTAL_STEPS ))
+    echo "[${percent}%] $1"
 }
 
 # ----------------------------------------------------------------------
@@ -70,9 +71,7 @@ log_only "Таблица ai_requests создана."
 # ----------------------------------------------------------------------
 next_step "Добавление настроек DeepSeek в админ-панель"
 
-# Проверяем, есть ли уже блок настроек AI в settings.php
 if ! grep -q "deepseek_api_key" "$ADMIN_DIR/settings.php"; then
-    # Создаём резервную копию
     cp "$ADMIN_DIR/settings.php" "$ADMIN_DIR/settings.php.bak.$(date +%Y%m%d%H%M%S)"
     
     # Вставляем блок настроек перед кнопкой сохранения
@@ -108,7 +107,8 @@ fi
 # 3. Создание страницы генерации контента ai_generator.php
 # ----------------------------------------------------------------------
 next_step "Создание ai_generator.php"
-create_php_file "$ADMIN_DIR/ai_generator.php" '<?php
+create_php_file "$ADMIN_DIR/ai_generator.php" <<'AIGEN'
+<?php
 require_once __DIR__ . "/includes/auth.php";
 requireLogin();
 $site_name = getSetting("site_name", SITE_NAME);
@@ -129,7 +129,6 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["prompt"])) {
     } elseif (empty($api_key)) {
         $error = "API ключ DeepSeek не настроен. Перейдите в Настройки и добавьте ключ.";
     } else {
-        // Запрос к API DeepSeek
         $ch = curl_init("https://api.deepseek.com/v1/chat/completions");
         $data = [
             "model" => $model,
@@ -153,7 +152,6 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["prompt"])) {
         if ($http_code === 200) {
             $result = json_decode($response, true);
             $generated_text = $result["choices"][0]["message"]["content"] ?? "";
-            // Сохраняем в историю
             $stmt = $pdo->prepare("INSERT INTO ai_requests (prompt, response, user_id) VALUES (?, ?, ?)");
             $stmt->execute([$prompt, $generated_text, $_SESSION["user_id"]]);
         } else {
@@ -170,30 +168,6 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["prompt"])) {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
     <link rel="stylesheet" href="/admin/css/admin.css">
-    <script src="https://cdn.tiny.cloud/1/no-api-key/tinymce/6/tinymce.min.js" referrerpolicy="origin"></script>
-    <script>
-    function insertToEditor() {
-        var text = document.getElementById("generated_text").innerText;
-        if (window.opener && window.opener.tinymce) {
-            var editor = window.opener.tinymce.activeEditor;
-            if (editor) {
-                editor.insertContent(text);
-                window.close();
-            } else {
-                alert("Редактор не найден");
-            }
-        } else {
-            alert("Окно не связано с редактором");
-        }
-    }
-    function createPage() {
-        var title = document.getElementById("generated_title").value;
-        var content = document.getElementById("generated_text").innerText;
-        if (!title) title = "Новая страница";
-        var url = "/admin/edit_page.php?prefill_title=" + encodeURIComponent(title) + "&prefill_content=" + encodeURIComponent(content);
-        window.open(url, "_blank");
-    }
-    </script>
 </head>
 <body class="theme-<?= getSetting("admin_theme", "light") ?>">
     <?php include "includes/header.php"; ?>
@@ -243,16 +217,41 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["prompt"])) {
             </main>
         </div>
     </div>
+    <script>
+    function insertToEditor() {
+        var text = document.getElementById("generated_text").innerText;
+        if (window.opener && window.opener.tinymce) {
+            var editor = window.opener.tinymce.activeEditor;
+            if (editor) {
+                editor.insertContent(text);
+                window.close();
+            } else {
+                alert("Редактор не найден");
+            }
+        } else {
+            alert("Окно не связано с редактором");
+        }
+    }
+    function createPage() {
+        var title = document.getElementById("generated_title").value;
+        var content = document.getElementById("generated_text").innerText;
+        if (!title) title = "Новая страница";
+        var url = "/admin/edit_page.php?prefill_title=" + encodeURIComponent(title) + "&prefill_content=" + encodeURIComponent(content);
+        window.open(url, "_blank");
+    }
+    </script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
-</html>'
+</html>
+AIGEN
 log_only "ai_generator.php создан."
 
 # ----------------------------------------------------------------------
 # 4. Создание страницы истории запросов ai_history.php
 # ----------------------------------------------------------------------
 next_step "Создание ai_history.php"
-create_php_file "$ADMIN_DIR/ai_history.php" '<?php
+create_php_file "$ADMIN_DIR/ai_history.php" <<'AIHIST'
+<?php
 require_once __DIR__ . "/includes/auth.php";
 requireAdmin();
 $site_name = getSetting("site_name", SITE_NAME);
@@ -311,7 +310,6 @@ $requests = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                     <button class="btn btn-sm btn-info" data-bs-toggle="modal" data-bs-target="#modal_<?= $req["id"] ?>"><i class="bi bi-eye"></i></button>
                                 </td>
                             </tr>
-                            <!-- Модальное окно для деталей -->
                             <div class="modal fade" id="modal_<?= $req["id"] ?>" tabindex="-1">
                                 <div class="modal-dialog modal-lg">
                                     <div class="modal-content">
@@ -349,14 +347,16 @@ $requests = $stmt->fetchAll(PDO::FETCH_ASSOC);
     </div>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
-</html>'
+</html>
+AIHIST
 log_only "ai_history.php создан."
 
 # ----------------------------------------------------------------------
 # 5. Создание API эндпоинта для TinyMCE (ai_api.php)
 # ----------------------------------------------------------------------
 next_step "Создание ai_api.php для AJAX-запросов из редактора"
-create_php_file "$ADMIN_DIR/ai_api.php" '<?php
+create_php_file "$ADMIN_DIR/ai_api.php" <<'AIPHP'
+<?php
 require_once __DIR__ . "/../config.php";
 require_once "includes/functions.php";
 require_once "includes/auth.php";
@@ -405,7 +405,6 @@ curl_close($ch);
 if ($http_code === 200) {
     $result = json_decode($response, true);
     $generated_text = $result["choices"][0]["message"]["content"] ?? "";
-    // Сохраняем в историю
     global $pdo;
     $stmt = $pdo->prepare("INSERT INTO ai_requests (prompt, response, user_id) VALUES (?, ?, ?)");
     $stmt->execute([$prompt, $generated_text, $_SESSION["user_id"]]);
@@ -413,16 +412,17 @@ if ($http_code === 200) {
 } else {
     echo json_encode(["error" => "Ошибка API: HTTP $http_code"]);
 }
-'
+AIPHP
 log_only "ai_api.php создан."
 
 # ----------------------------------------------------------------------
-# 6. Добавление кнопки AI в TinyMCE (edit_page.php и edit_file.php)
+# 6. Интеграция кнопки AI в TinyMCE (безопасная версия – отдельный плагин)
 # ----------------------------------------------------------------------
 next_step "Интеграция кнопки AI в редактор TinyMCE"
 
-# Создаём отдельный JavaScript-файл для кнопки AI
-cat > "$ADMIN_DIR/js/ai_tinymce_plugin.js" <<'JSCODE'
+# Создаём отдельный JavaScript-файл плагина
+mkdir -p "$ADMIN_DIR/js"
+cat > "$ADMIN_DIR/js/ai_tinymce_plugin.js" <<'JSPLUGIN'
 tinymce.PluginManager.add('ai_button', function(editor, url) {
     editor.ui.registry.addButton('ai_button', {
         text: 'AI',
@@ -449,13 +449,12 @@ tinymce.PluginManager.add('ai_button', function(editor, url) {
         }
     });
 });
-JSCODE
+JSPLUGIN
+log_only "Плагин AI для TinyMCE создан."
 
-# Добавляем подключение плагина в tinymce.init в edit_page.php и edit_file.php
-# Безопасно вставляем строку external_plugins после selector
+# Добавляем подключение плагина в tinymce.init для edit_page.php и edit_file.php
 for file in "$ADMIN_DIR/edit_page.php" "$ADMIN_DIR/edit_file.php"; do
     if [[ -f "$file" ]]; then
-        # Проверяем, есть ли уже подключение
         if ! grep -q "external_plugins" "$file"; then
             cp "$file" "$file.bak.$(date +%Y%m%d%H%M%S)"
             # Вставляем external_plugins после строки selector
@@ -467,6 +466,7 @@ for file in "$ADMIN_DIR/edit_page.php" "$ADMIN_DIR/edit_file.php"; do
         fi
     fi
 done
+log_only "Кнопка AI добавлена в редакторы TinyMCE."
 
 # ----------------------------------------------------------------------
 # 7. Добавление пунктов меню в sidebar.php
@@ -476,7 +476,6 @@ SIDEBAR="$ADMIN_DIR/includes/sidebar.php"
 if [[ -f "$SIDEBAR" ]]; then
     if ! grep -q "ai_generator.php" "$SIDEBAR"; then
         cp "$SIDEBAR" "$SIDEBAR.bak.$(date +%Y%m%d%H%M%S)"
-        # Вставляем пункт меню после "content" или перед "settings"
         sed -i '/<li class="nav-item">.*content.php/a \
 <li class="nav-item">\
     <a class="nav-link <?= $current_page=="ai_generator.php"?"active":"" ?>" href="/admin/ai_generator.php">\
@@ -499,16 +498,15 @@ else
 fi
 
 # ----------------------------------------------------------------------
-# 8. Добавление языковых ключей (если отсутствуют)
+# 8. Обновление языковых файлов (безопасное, через временный файл)
 # ----------------------------------------------------------------------
 next_step "Обновление языковых файлов"
 for lang in ru en; do
     LOCALE_FILE="$ADMIN_DIR/locale/$lang.php"
     if [[ -f "$LOCALE_FILE" ]]; then
         if ! grep -q "ai_generator" "$LOCALE_FILE"; then
-            # Создаём временный файл
             TMP_FILE=$(mktemp)
-            # Копируем содержимое до последней строки "];"
+            # Копируем всё, кроме последней строки "];"
             sed '$d' "$LOCALE_FILE" > "$TMP_FILE"
             # Добавляем новые ключи
             if [[ "$lang" == "ru" ]]; then
@@ -520,7 +518,6 @@ for lang in ru en; do
             fi
             # Добавляем закрывающую строку
             echo '];' >> "$TMP_FILE"
-            # Заменяем оригинальный файл
             mv "$TMP_FILE" "$LOCALE_FILE"
             log_only "Добавлены языковые ключи для AI в $lang.php"
         fi
