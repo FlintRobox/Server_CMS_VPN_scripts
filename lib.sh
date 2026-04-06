@@ -57,12 +57,6 @@ show_progress() {
 # Аргументы: create_php_file <путь_к_файлу> "содержимое"
 create_php_file() {
     local file="$1"
-    local content=""
-    if [[ $# -ge 2 ]]; then
-        content="$2"
-    else
-        content=$(cat)
-    fi
     local backup_ext=".backup.$(date +%Y%m%d%H%M%S)"
     
     if [[ -f "$file" ]] && [[ "$FORCE_MODE" == false ]]; then
@@ -76,8 +70,9 @@ create_php_file() {
     fi
     
     mkdir -p "$(dirname "$file")"
-    # Используем printf вместо echo, чтобы избежать интерпретации символов
-    printf '%s' "$content" > "$file"
+    
+    # Читаем весь stdin и записываем в файл
+    cat > "$file"
     log_only "Файл $file создан/обновлён."
     
     if [[ "$file" == *.php ]]; then
