@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 3.4 (улучшена установка xray-core, добавлены проверки)
+# Версия: 3.5 (исправлен парсинг ключей Reality, обработка ошибок)
 # =====================================================================
 
 set -euo pipefail
@@ -183,7 +183,7 @@ ufw allow "$SUBSCRIPTION_PORT"/tcp >> "$LOG_FILE" 2>&1
 ufw reload >> "$LOG_FILE" 2>&1
 log "UFW настроен."
 
-# --- Генерация ключей Reality (с принудительной установкой xray-core) ---
+# --- Генерация ключей Reality (с поддержкой обоих форматов вывода xray) ---
 log "Генерация ключей Reality..."
 
 # Функция установки xray-core
@@ -217,12 +217,14 @@ fi
 
 log "Используется xray: $XRAY_BIN"
 
+# Генерируем ключи и парсим вывод (поддерживаем старый и новый формат)
 KEY_PAIR=$("$XRAY_BIN" x25519)
-PRIVATE_KEY=$(echo "$KEY_PAIR" | grep "Private key:" | awk '{print $3}')
-PUBLIC_KEY=$(echo "$KEY_PAIR" | grep "Public key:" | awk '{print $3}')
+PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -E "(Private key:|PrivateKey:)" | awk '{print $2}')
+PUBLIC_KEY=$(echo "$KEY_PAIR" | grep -E "(Public key:|Password \(PublicKey\):|PublicKey:)" | awk '{print $2}')
 
 if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
-    log "${RED}Не удалось сгенерировать ключи Reality.${NC}"
+    log "${RED}Не удалось сгенерировать ключи Reality. Вывод xray:${NC}"
+    echo "$KEY_PAIR"
     exit 1
 fi
 log_only "Reality ключи сгенерированы."
