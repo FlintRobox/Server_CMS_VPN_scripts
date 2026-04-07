@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 3.6 (исправлено дублирование в .env, добавлены функции)
+# Версия: 3.6 (исправлено дублирование кода Nginx, логика восстановления)
 # =====================================================================
 
 set -euo pipefail
@@ -22,14 +22,14 @@ sqlite3_escape() {
     sed "s/'/''/g"
 }
 
-# Функция безопасного добавления переменной в .env (если отсутствует)
+# Функция безопасного добавления переменной в .env (без дублей)
 add_to_env() {
     local key="$1"
     local value="$2"
-    local env_file="$SCRIPT_DIR/.env"
-    if ! grep -q "^${key}=" "$env_file"; then
-        echo "${key}=\"${value}\"" >> "$env_file"
-        log_only "Добавлена переменная ${key} в .env"
+    if grep -q "^${key}=" "$SCRIPT_DIR/.env"; then
+        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$SCRIPT_DIR/.env"
+    else
+        echo "${key}=\"${value}\"" >> "$SCRIPT_DIR/.env"
     fi
 }
 
@@ -43,10 +43,8 @@ fi
 load_env "DOMAIN" "ADMIN_EMAIL"
 
 # --- Определение дополнительных переменных ---
-WEB_ROOT_BASE="${WEB_ROOT_BASE:-/var/www}"
-SITE_DIR="${WEB_ROOT_BASE}/${DOMAIN}"
-PHP_VERSION="8.3"
-PHP_SOCKET="/run/php/php${PHP_VERSION}-fpm.sock"
+SITE_DIR="${WEB_ROOT_BASE:-/var/www}/${DOMAIN}"
+PHP_SOCKET="/run/php/php8.3-fpm.sock"
 
 # --- Проверка наличия необходимых утилит ---
 for pkg in sqlite3 jq curl; do
@@ -90,20 +88,15 @@ if [[ -z "$NGINX_LOCAL_PORT" ]]; then
     log_only "Выбран локальный порт для Nginx: $NGINX_LOCAL_PORT"
 fi
 
-# --- Модификация конфигурации Nginx ---
+# --- Модификация конфигурации Nginx (без дублирования) ---
 NGINX_CONF="/etc/nginx/sites-available/$DOMAIN"
 if [[ ! -f "$NGINX_CONF" ]]; then
     log "${RED}Конфигурация Nginx для $DOMAIN не найдена. Сначала выполните cms.sh.${NC}"
     exit 1
 fi
 
-BACKUP_FILE="$NGINX_CONF.bak"
-cp "$NGINX_CONF" "$BACKUP_FILE"
-log_only "Создана резервная копия $BACKUP_FILE"
-
-if grep -q "listen 127.0.0.1:$NGINX_LOCAL_PORT" "$NGINX_CONF"; then
-    log "${YELLOW}Nginx уже настроен на локальный порт $NGINX_LOCAL_PORT. Пропуск изменения конфигурации.${NC}"
-else
+# Функция генерации правильной конфигурации Nginx
+generate_nginx_config() {
     cat > "$NGINX_CONF" <<EOF
 server {
     listen 80;
@@ -139,6 +132,39 @@ server {
     server_tokens off;
 }
 EOF
+}
+
+# Проверяем, настроен ли уже fallback
+if grep -q "listen 127.0.0.1:$NGINX_LOCAL_PORT" "$NGINX_CONF"; then
+    log "${YELLOW}Nginx уже настроен на локальный порт $NGINX_LOCAL_PORT. Проверяем работоспособность...${NC}"
+    if nginx -t >> "$LOG_FILE" 2>&1; then
+        log "${GREEN}Конфигурация Nginx корректна. Пропуск изменения.${NC}"
+    else
+        log "${RED}Конфигурация Nginx содержит ошибки, несмотря на наличие fallback.${NC}"
+        nginx -t 2>&1 | tee -a "$LOG_FILE"
+        # Пытаемся восстановить из резервной копии
+        if [[ -f "$NGINX_CONF.bak" ]]; then
+            log "${YELLOW}Восстанавливаем конфигурацию из резервной копии.${NC}"
+            mv "$NGINX_CONF.bak" "$NGINX_CONF"
+        else
+            log "${YELLOW}Резервная копия не найдена. Генерируем новую конфигурацию.${NC}"
+            cp "$NGINX_CONF" "$NGINX_CONF.bak" 2>/dev/null || true
+            generate_nginx_config
+        fi
+        if nginx -t >> "$LOG_FILE" 2>&1; then
+            systemctl reload nginx
+            log "${GREEN}Конфигурация Nginx исправлена и перезагружена.${NC}"
+        else
+            log "${RED}Не удалось исправить конфигурацию Nginx. Выход.${NC}"
+            nginx -t 2>&1 | tee -a "$LOG_FILE"
+            exit 1
+        fi
+    fi
+else
+    # Fallback не настроен – создаём новую конфигурацию
+    log "${YELLOW}Настройка Nginx для работы через локальный порт $NGINX_LOCAL_PORT...${NC}"
+    cp "$NGINX_CONF" "$NGINX_CONF.bak"
+    generate_nginx_config
     if nginx -t >> "$LOG_FILE" 2>&1; then
         systemctl reload nginx
         log "${GREEN}Конфигурация Nginx обновлена: сайт слушает на 127.0.0.1:$NGINX_LOCAL_PORT.${NC}"
@@ -146,7 +172,7 @@ EOF
         log "${RED}Ошибка в конфигурации Nginx:${NC}"
         nginx -t 2>&1 | tee -a "$LOG_FILE"
         log "${RED}Восстанавливаем резервную копию.${NC}"
-        mv "$BACKUP_FILE" "$NGINX_CONF"
+        mv "$NGINX_CONF.bak" "$NGINX_CONF"
         systemctl reload nginx
         exit 1
     fi
@@ -223,7 +249,6 @@ if [[ -z "$SUBSCRIPTION_PORT" ]]; then
     SUBSCRIPTION_PORT="2096"
 fi
 ufw allow "$SUBSCRIPTION_PORT"/tcp >> "$LOG_FILE" 2>&1
-
 ufw reload >> "$LOG_FILE" 2>&1
 log "UFW настроен."
 
@@ -234,22 +259,10 @@ log "Генерация ключей Reality..."
 install_xray() {
     log "${YELLOW}xray-core не найден. Устанавливаем...${NC}"
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >> "$LOG_FILE" 2>&1
-    if ! command -v xray &>/dev/null; then
-        XRAY_BIN=$(find /usr/local -name xray -type f 2>/dev/null | head -1)
-        if [[ -z "$XRAY_BIN" ]]; then
-            return 1
-        fi
-    else
-        XRAY_BIN=$(which xray)
-    fi
-    return 0
 }
 
 if ! command -v xray &>/dev/null; then
-    if ! install_xray; then
-        log "${RED}Не удалось установить xray-core.${NC}"
-        exit 1
-    fi
+    install_xray
 fi
 
 XRAY_BIN=$(which xray 2>/dev/null || find /usr/local -name xray -type f 2>/dev/null | head -1)
