@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 3.3 (улучшена установка 3X-UI, добавлены таймауты и обработка ошибок)
+# Версия: 3.4 (улучшена установка xray-core, добавлены проверки)
 # =====================================================================
 
 set -euo pipefail
@@ -114,10 +114,8 @@ if systemctl list-units --full --all | grep -q "$XUI_SERVICE.service"; then
 else
     log "${YELLOW}Установка 3X-UI...${NC}"
     INSTALL_SCRIPT="/tmp/install_3xui.sh"
-    # Скачиваем скрипт с таймаутом
     if curl -fsSL --connect-timeout 10 --max-time 30 https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh -o "$INSTALL_SCRIPT"; then
         chmod +x "$INSTALL_SCRIPT"
-        # Запускаем скрипт с таймаутом 300 секунд, перенаправляя stdin из /dev/null
         if timeout 300 bash "$INSTALL_SCRIPT" </dev/null >> "$LOG_FILE" 2>&1; then
             rm -f "$INSTALL_SCRIPT"
             systemctl stop $XUI_SERVICE
@@ -179,23 +177,46 @@ ufw allow "$SUBSCRIPTION_PORT"/tcp >> "$LOG_FILE" 2>&1
 ufw reload >> "$LOG_FILE" 2>&1
 log "UFW настроен."
 
-# --- Генерация ключей Reality ---
+# --- Генерация ключей Reality (с принудительной установкой xray-core) ---
 log "Генерация ключей Reality..."
-if ! command -v xray &>/dev/null; then
+
+# Функция установки xray-core
+install_xray() {
     log "${YELLOW}xray-core не найден. Устанавливаем...${NC}"
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >> "$LOG_FILE" 2>&1
-fi
-XRAY_BIN=$(which xray)
-if [[ -x "$XRAY_BIN" ]]; then
-    KEY_PAIR=$("$XRAY_BIN" x25519)
-    PRIVATE_KEY=$(echo "$KEY_PAIR" | grep "Private key:" | awk '{print $3}')
-    PUBLIC_KEY=$(echo "$KEY_PAIR" | grep "Public key:" | awk '{print $3}')
-    if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
-        log "${RED}Не удалось сгенерировать ключи Reality.${NC}"
+    if ! command -v xray &>/dev/null; then
+        XRAY_BIN=$(find /usr/local -name xray -type f 2>/dev/null | head -1)
+        if [[ -z "$XRAY_BIN" ]]; then
+            return 1
+        fi
+    else
+        XRAY_BIN=$(which xray)
+    fi
+    return 0
+}
+
+# Проверяем наличие xray
+if ! command -v xray &>/dev/null; then
+    if ! install_xray; then
+        log "${RED}Не удалось установить xray-core.${NC}"
         exit 1
     fi
-else
+fi
+
+XRAY_BIN=$(which xray 2>/dev/null || find /usr/local -name xray -type f 2>/dev/null | head -1)
+if [[ -z "$XRAY_BIN" || ! -x "$XRAY_BIN" ]]; then
     log "${RED}Не найден исполняемый файл xray.${NC}"
+    exit 1
+fi
+
+log "Используется xray: $XRAY_BIN"
+
+KEY_PAIR=$("$XRAY_BIN" x25519)
+PRIVATE_KEY=$(echo "$KEY_PAIR" | grep "Private key:" | awk '{print $3}')
+PUBLIC_KEY=$(echo "$KEY_PAIR" | grep "Public key:" | awk '{print $3}')
+
+if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
+    log "${RED}Не удалось сгенерировать ключи Reality.${NC}"
     exit 1
 fi
 log_only "Reality ключи сгенерированы."
