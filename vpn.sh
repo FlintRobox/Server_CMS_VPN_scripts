@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 3.9 (удалён проблемный IPv6-слушатель)
+# Версия: 4.2 (TLS + ALPN, fallback на локальный HTTP)
 # =====================================================================
 
 set -euo pipefail
@@ -83,7 +83,7 @@ if [[ ! -f "$NGINX_CONF" ]]; then
     exit 1
 fi
 
-log "${YELLOW}Создаём резервную копию текущей конфигурации и генерируем новую (без IPv6)...${NC}"
+log "${YELLOW}Создаём резервную копию и генерируем новую конфигурацию (локальный порт без SSL)...${NC}"
 cp "$NGINX_CONF" "$NGINX_CONF.bak.$(date +%Y%m%d%H%M%S)"
 cat > "$NGINX_CONF" <<EOF
 server {
@@ -94,14 +94,10 @@ server {
 }
 
 server {
-    listen 127.0.0.1:$NGINX_LOCAL_PORT ssl;
+    listen 127.0.0.1:$NGINX_LOCAL_PORT;
     server_name $DOMAIN;
     root $SITE_DIR;
     index index.php index.html;
-
-    ssl_certificate $SSL_DIR/fullchain.pem;
-    ssl_certificate_key $SSL_DIR/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
 
     location / {
         try_files \$uri \$uri/ /index.php?\$args;
@@ -195,92 +191,71 @@ SUBSCRIPTION_PORT=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='su
 ufw allow "$SUBSCRIPTION_PORT"/tcp >> "$LOG_FILE" 2>&1
 ufw reload >> "$LOG_FILE" 2>&1
 
-log "Генерация ключей Reality..."
-if ! command -v xray &>/dev/null; then
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >> "$LOG_FILE" 2>&1
-fi
-XRAY_BIN=$(which xray 2>/dev/null || find /usr/local -name xray -type f 2>/dev/null | head -1)
-if [[ -z "$XRAY_BIN" || ! -x "$XRAY_BIN" ]]; then
-    log "${RED}Не найден xray.${NC}"
-    exit 1
-fi
-KEY_PAIR=$("$XRAY_BIN" x25519)
-PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -E "(Private key:|PrivateKey:)" | awk '{print $2}')
-PUBLIC_KEY=$(echo "$KEY_PAIR" | grep -E "(Public key:|Password \(PublicKey\):|PublicKey:)" | awk '{print $2}')
-if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
-    log "${RED}Не удалось сгенерировать ключи.${NC}"
-    exit 1
-fi
+# --- Создание inbound с TLS ---
+log "Создание inbound VLESS+TLS на порту 443..."
 
-INBOUND_JSON=$(cat <<EOF
-{
-  "protocol": "vless",
-  "port": 443,
-  "settings": {
-    "clients": [],
-    "decryption": "none",
-    "fallbacks": [{"dest": "127.0.0.1:$NGINX_LOCAL_PORT", "xver": 0}]
-  },
-  "streamSettings": {
-    "network": "tcp",
-    "security": "reality",
-    "realitySettings": {
-      "show": false,
-      "dest": "$DOMAIN:443",
-      "xver": 0,
-      "serverNames": ["$DOMAIN"],
-      "privateKey": "$PRIVATE_KEY",
-      "publicKey": "$PUBLIC_KEY",
-      "minClientVer": "",
-      "maxClientVer": "",
-      "maxTimeDiff": 0,
-      "shortIds": ["", "1234567890abcdef"]
+CLIENT_UUID=$(cat /proc/sys/kernel/random/uuid)
+
+SETTINGS_JSON=$(jq -c -n \
+    --arg uuid "$CLIENT_UUID" \
+    --arg local_port "$NGINX_LOCAL_PORT" \
+'{
+    clients: [{
+        id: $uuid,
+        flow: "xtls-rprx-vision",
+        email: "client1",
+        enable: true
+    }],
+    decryption: "none",
+    fallbacks: [{
+        dest: ("127.0.0.1:" + $local_port)
+    }]
+}')
+
+STREAM_JSON=$(jq -c -n \
+    --arg domain "$DOMAIN" \
+    --arg fullchain "$SSL_DIR/fullchain.pem" \
+    --arg key "$SSL_DIR/privkey.pem" \
+'{
+    network: "tcp",
+    security: "tls",
+    tlsSettings: {
+        serverName: $domain,
+        certificates: [{
+            certificateFile: $fullchain,
+            keyFile: $key
+        }],
+        alpn: ["http/1.1"]
+    },
+    tcpSettings: {
+        header: {
+            type: "none"
+        }
     }
-  },
-  "sniffing": {
-    "enabled": true,
-    "destOverride": ["http", "tls"]
-  }
-}
-EOF
-)
+}')
+
+SNIFFING_JSON='{"enabled":true,"destOverride":["http","tls"]}'
 
 EXISTING_INBOUND=$(sqlite3 "$DB_PATH" "SELECT id FROM inbounds WHERE port=443 LIMIT 1;" 2>/dev/null)
 if [[ -z "$EXISTING_INBOUND" ]] || $FORCE_MODE; then
     if [[ -n "$EXISTING_INBOUND" ]]; then
         sqlite3 "$DB_PATH" "DELETE FROM inbounds WHERE id=$EXISTING_INBOUND;" >> "$LOG_FILE" 2>&1
+        log_only "Удалён старый inbound на порту 443."
     fi
-    ESCAPED_JSON=$(echo "$INBOUND_JSON" | sqlite3_escape)
-    sqlite3 "$DB_PATH" "INSERT INTO inbounds (port, protocol, settings, stream_settings, sniffing, enable, tag) VALUES (443, 'vless', '$ESCAPED_JSON', '$ESCAPED_JSON', '$ESCAPED_JSON', 1, 'vless-reality-inbound');" >> "$LOG_FILE" 2>&1
-    log "${GREEN}Inbound создан.${NC}"
-else
-    log "${YELLOW}Inbound уже существует.${NC}"
-fi
-
-CLIENT_UUID=$(cat /proc/sys/kernel/random/uuid)
-CLIENT_JSON=$(cat <<EOF
-{
-  "id": "$CLIENT_UUID",
-  "flow": "xtls-rprx-vision",
-  "email": "user1@$DOMAIN",
-  "limitIp": 0,
-  "totalGB": 0,
-  "expiryTime": 0,
-  "enable": true,
-  "tgId": "",
-  "subId": ""
-}
+    ESCAPED_SETTINGS=$(echo "$SETTINGS_JSON" | sqlite3_escape)
+    ESCAPED_STREAM=$(echo "$STREAM_JSON" | sqlite3_escape)
+    ESCAPED_SNIFFING=$(echo "$SNIFFING_JSON" | sqlite3_escape)
+    sqlite3 "$DB_PATH" <<EOF
+INSERT INTO inbounds (user_id, up, down, total, remark, enable, expiry_time, listen, port, protocol, settings, stream_settings, tag, sniffing)
+VALUES (1, 0, 0, 0, 'VLESS+TLS', 1, 0, '', 443, 'vless', '$ESCAPED_SETTINGS', '$ESCAPED_STREAM', 'inbound-443', '$ESCAPED_SNIFFING');
 EOF
-)
-
-INBOUND_ID=$(sqlite3 "$DB_PATH" "SELECT id FROM inbounds WHERE port=443 LIMIT 1;")
-if [[ -n "$INBOUND_ID" ]]; then
-    CURRENT_SETTINGS=$(sqlite3 "$DB_PATH" "SELECT settings FROM inbounds WHERE id=$INBOUND_ID;")
-    NEW_SETTINGS=$(echo "$CURRENT_SETTINGS" | jq ".clients += [$CLIENT_JSON]")
-    ESCAPED_SETTINGS=$(echo "$NEW_SETTINGS" | sqlite3_escape)
-    sqlite3 "$DB_PATH" "UPDATE inbounds SET settings='$ESCAPED_SETTINGS' WHERE id=$INBOUND_ID;" >> "$LOG_FILE" 2>&1
-    log "${GREEN}Клиент добавлен (UUID: $CLIENT_UUID).${NC}"
+    log "${GREEN}Inbound для VPN создан.${NC}"
+else
+    log "${YELLOW}Inbound на порту 443 уже существует. Пропуск (используйте --force для перезаписи).${NC}"
+    CLIENT_UUID=$(sqlite3 "$DB_PATH" "SELECT json_extract(settings, '$.clients[0].id') FROM inbounds WHERE port=443;" 2>/dev/null)
 fi
+
+log "Клиент UUID: $CLIENT_UUID"
 
 systemctl restart $XUI_SERVICE >> "$LOG_FILE" 2>&1
 systemctl reload nginx
@@ -298,14 +273,13 @@ log "   URL: ${PROTOCOL}://${DOMAIN}:${XUI_PORT}${XUI_PATH}"
 log "   Логин: ${XUI_USERNAME}"
 log "   Пароль: ${XUI_PASSWORD}"
 echo ""
-log "🔐 Параметры VPN-клиента:"
+log "🔐 Параметры VPN-клиента (VLESS + TLS):"
 log "   Адрес: ${DOMAIN}"
 log "   Порт: 443"
 log "   UUID: ${CLIENT_UUID}"
 log "   Flow: xtls-rprx-vision"
 log "   SNI: ${DOMAIN}"
-log "   PublicKey: ${PUBLIC_KEY}"
-log "   ShortId: 1234567890abcdef (или пустой)"
+log "   ALPN: http/1.1"
 echo ""
 log "📡 Порт подписок: ${SUBSCRIPTION_PORT}"
 log "   Ссылка: ${PROTOCOL}://${DOMAIN}:${SUBSCRIPTION_PORT}/sub/${CLIENT_UUID}"
