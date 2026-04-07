@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 4.2 (TLS + ALPN, fallback на локальный HTTP)
+# Версия: 4.4 (HTTPS для панели, TLS для inbound, полная автоматизация)
 # =====================================================================
 
 set -euo pipefail
@@ -148,6 +148,7 @@ else
     fi
 fi
 
+# --- Генерация параметров панели (если не заданы в .env) ---
 if [[ -z "${XUI_PORT:-}" ]]; then
     XUI_PORT=$(( RANDOM % 1000 + 52000 ))
     add_to_env "XUI_PORT" "$XUI_PORT"
@@ -165,7 +166,8 @@ if [[ -z "${XUI_PASSWORD:-}" ]]; then
     add_to_env "XUI_PASSWORD" "$XUI_PASSWORD"
 fi
 
-log "Настройка панели 3X-UI..."
+# --- Настройка панели через утилиту x-ui ---
+log "Настройка параметров панели 3X-UI..."
 x-ui setting -port "$XUI_PORT" -username "$XUI_USERNAME" -password "$XUI_PASSWORD" >> "$LOG_FILE" 2>&1
 
 DB_PATH="/etc/x-ui/x-ui.db"
@@ -175,7 +177,16 @@ if [[ ! -f "$DB_PATH" ]]; then
 fi
 sqlite3 "$DB_PATH" "UPDATE settings SET value='$XUI_PATH' WHERE key='webBasePath';" >> "$LOG_FILE" 2>&1
 
-log "Настройка UFW..."
+# --- Включение HTTPS для панели ---
+log "Включение HTTPS для панели 3X-UI..."
+sqlite3 "$DB_PATH" <<EOF
+UPDATE settings SET value='$SSL_DIR/fullchain.pem' WHERE key='webCertFile';
+UPDATE settings SET value='$SSL_DIR/privkey.pem' WHERE key='webKeyFile';
+UPDATE settings SET value='true' WHERE key='webEnable';
+EOF
+
+# --- Настройка UFW ---
+log "Настройка UFW для панели 3X-UI..."
 if [[ -n "${ADMIN_IP:-}" ]]; then
     ufw allow from "$ADMIN_IP" to any port "$XUI_PORT" proto tcp >> "$LOG_FILE" 2>&1
     log "${GREEN}Доступ к панели ограничен IP $ADMIN_IP.${NC}"
@@ -192,7 +203,10 @@ ufw allow "$SUBSCRIPTION_PORT"/tcp >> "$LOG_FILE" 2>&1
 ufw reload >> "$LOG_FILE" 2>&1
 
 # --- Создание inbound с TLS ---
-log "Создание inbound VLESS+TLS на порту 443..."
+log "Создание inbound VLESS+TLS на порту 443 (удаляем старые)..."
+# Принудительно удаляем все inbound на порту 443
+sqlite3 "$DB_PATH" "DELETE FROM inbounds WHERE port=443;" >> "$LOG_FILE" 2>&1
+log_only "Удалены все старые inbound на порту 443."
 
 CLIENT_UUID=$(cat /proc/sys/kernel/random/uuid)
 
@@ -236,30 +250,23 @@ STREAM_JSON=$(jq -c -n \
 
 SNIFFING_JSON='{"enabled":true,"destOverride":["http","tls"]}'
 
-EXISTING_INBOUND=$(sqlite3 "$DB_PATH" "SELECT id FROM inbounds WHERE port=443 LIMIT 1;" 2>/dev/null)
-if [[ -z "$EXISTING_INBOUND" ]] || $FORCE_MODE; then
-    if [[ -n "$EXISTING_INBOUND" ]]; then
-        sqlite3 "$DB_PATH" "DELETE FROM inbounds WHERE id=$EXISTING_INBOUND;" >> "$LOG_FILE" 2>&1
-        log_only "Удалён старый inbound на порту 443."
-    fi
-    ESCAPED_SETTINGS=$(echo "$SETTINGS_JSON" | sqlite3_escape)
-    ESCAPED_STREAM=$(echo "$STREAM_JSON" | sqlite3_escape)
-    ESCAPED_SNIFFING=$(echo "$SNIFFING_JSON" | sqlite3_escape)
-    sqlite3 "$DB_PATH" <<EOF
+ESCAPED_SETTINGS=$(echo "$SETTINGS_JSON" | sqlite3_escape)
+ESCAPED_STREAM=$(echo "$STREAM_JSON" | sqlite3_escape)
+ESCAPED_SNIFFING=$(echo "$SNIFFING_JSON" | sqlite3_escape)
+
+sqlite3 "$DB_PATH" <<EOF
 INSERT INTO inbounds (user_id, up, down, total, remark, enable, expiry_time, listen, port, protocol, settings, stream_settings, tag, sniffing)
 VALUES (1, 0, 0, 0, 'VLESS+TLS', 1, 0, '', 443, 'vless', '$ESCAPED_SETTINGS', '$ESCAPED_STREAM', 'inbound-443', '$ESCAPED_SNIFFING');
 EOF
-    log "${GREEN}Inbound для VPN создан.${NC}"
-else
-    log "${YELLOW}Inbound на порту 443 уже существует. Пропуск (используйте --force для перезаписи).${NC}"
-    CLIENT_UUID=$(sqlite3 "$DB_PATH" "SELECT json_extract(settings, '$.clients[0].id') FROM inbounds WHERE port=443;" 2>/dev/null)
-fi
 
+log "${GREEN}Inbound для VPN создан (TLS, ALPN http/1.1).${NC}"
 log "Клиент UUID: $CLIENT_UUID"
 
+# --- Перезапуск служб ---
 systemctl restart $XUI_SERVICE >> "$LOG_FILE" 2>&1
 systemctl reload nginx
 
+# --- Итоговая информация ---
 PROTOCOL="https"
 [[ ! -f "$SSL_DIR/fullchain.pem" ]] && PROTOCOL="http"
 
@@ -268,8 +275,8 @@ log "${GREEN}======================================================"
 log "${GREEN}✅ VPN-сервер успешно развёрнут!${NC}"
 log "${GREEN}======================================================"
 echo ""
-log "🌐 Панель управления 3X-UI:"
-log "   URL: ${PROTOCOL}://${DOMAIN}:${XUI_PORT}${XUI_PATH}"
+log "🌐 Панель управления 3X-UI (HTTPS):"
+log "   URL: https://${DOMAIN}:${XUI_PORT}${XUI_PATH}"
 log "   Логин: ${XUI_USERNAME}"
 log "   Пароль: ${XUI_PASSWORD}"
 echo ""
@@ -284,6 +291,6 @@ echo ""
 log "📡 Порт подписок: ${SUBSCRIPTION_PORT}"
 log "   Ссылка: ${PROTOCOL}://${DOMAIN}:${SUBSCRIPTION_PORT}/sub/${CLIENT_UUID}"
 echo ""
-log "${YELLOW}⚠️  Если сайт не открывается, проверьте Nginx: nginx -t${NC}"
+log "${YELLOW}⚠️  Убедитесь, что порт ${XUI_PORT} открыт в UFW (уже должно быть).${NC}"
 log "======================================================"
 exit 0
