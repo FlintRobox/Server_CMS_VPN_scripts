@@ -14,6 +14,11 @@ if [[ ! -f "$SCRIPT_DIR/lib.sh" ]]; then
 fi
 source "$SCRIPT_DIR/lib.sh"
 
+# Экранирование строки для SQLite (удвоение одинарных кавычек)
+sqlite3_escape() {
+    sed "s/'/''/g"
+}
+
 # Инициализация флага принудительной перезаписи
 init_force_mode "$@"
 
