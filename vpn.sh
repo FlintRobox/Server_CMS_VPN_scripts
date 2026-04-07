@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 4.4 (HTTPS для панели, TLS для inbound, полная автоматизация)
+# Версия: 4.5 (полностью рабочая: HTTPS для панели, корректное применение настроек)
 # =====================================================================
 
 set -euo pipefail
@@ -175,15 +175,29 @@ if [[ ! -f "$DB_PATH" ]]; then
     log "${RED}База данных 3X-UI не найдена.${NC}"
     exit 1
 fi
+
+# Устанавливаем путь к панели
 sqlite3 "$DB_PATH" "UPDATE settings SET value='$XUI_PATH' WHERE key='webBasePath';" >> "$LOG_FILE" 2>&1
 
-# --- Включение HTTPS для панели ---
+# Включаем HTTPS для панели (используем сертификаты Let's Encrypt)
 log "Включение HTTPS для панели 3X-UI..."
 sqlite3 "$DB_PATH" <<EOF
 UPDATE settings SET value='$SSL_DIR/fullchain.pem' WHERE key='webCertFile';
 UPDATE settings SET value='$SSL_DIR/privkey.pem' WHERE key='webKeyFile';
 UPDATE settings SET value='true' WHERE key='webEnable';
 EOF
+
+# Перезапускаем панель, чтобы применить все изменения
+systemctl restart $XUI_SERVICE
+sleep 2
+
+# Проверяем, что панель запустилась на нужном порту
+if ! ss -tlnp | grep -q ":$XUI_PORT"; then
+    log "${RED}Ошибка: панель не запустилась на порту $XUI_PORT. Проверьте логи.${NC}"
+    journalctl -u $XUI_SERVICE -n 10 --no-pager
+    exit 1
+fi
+log "${GREEN}Панель успешно запущена на порту $XUI_PORT.${NC}"
 
 # --- Настройка UFW ---
 log "Настройка UFW для панели 3X-UI..."
@@ -202,7 +216,7 @@ SUBSCRIPTION_PORT=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='su
 ufw allow "$SUBSCRIPTION_PORT"/tcp >> "$LOG_FILE" 2>&1
 ufw reload >> "$LOG_FILE" 2>&1
 
-# --- Создание inbound с TLS ---
+# --- Создание inbound с TLS (не Reality) ---
 log "Создание inbound VLESS+TLS на порту 443 (удаляем старые)..."
 # Принудительно удаляем все inbound на порту 443
 sqlite3 "$DB_PATH" "DELETE FROM inbounds WHERE port=443;" >> "$LOG_FILE" 2>&1
@@ -262,14 +276,11 @@ EOF
 log "${GREEN}Inbound для VPN создан (TLS, ALPN http/1.1).${NC}"
 log "Клиент UUID: $CLIENT_UUID"
 
-# --- Перезапуск служб ---
+# --- Перезапуск служб (ещё раз для надёжности) ---
 systemctl restart $XUI_SERVICE >> "$LOG_FILE" 2>&1
 systemctl reload nginx
 
 # --- Итоговая информация ---
-PROTOCOL="https"
-[[ ! -f "$SSL_DIR/fullchain.pem" ]] && PROTOCOL="http"
-
 echo ""
 log "${GREEN}======================================================"
 log "${GREEN}✅ VPN-сервер успешно развёрнут!${NC}"
@@ -289,7 +300,7 @@ log "   SNI: ${DOMAIN}"
 log "   ALPN: http/1.1"
 echo ""
 log "📡 Порт подписок: ${SUBSCRIPTION_PORT}"
-log "   Ссылка: ${PROTOCOL}://${DOMAIN}:${SUBSCRIPTION_PORT}/sub/${CLIENT_UUID}"
+log "   Ссылка: https://${DOMAIN}:${SUBSCRIPTION_PORT}/sub/${CLIENT_UUID}"
 echo ""
 log "${YELLOW}⚠️  Убедитесь, что порт ${XUI_PORT} открыт в UFW (уже должно быть).${NC}"
 log "======================================================"
