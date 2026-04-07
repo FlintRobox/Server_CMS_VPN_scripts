@@ -693,14 +693,14 @@ create_php_file "$ADMIN_DIR/visitors.php" <<'VISITORS'
 <?php require_once "includes/auth.php"; requireLogin(); $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("visitors"); $date_from = $_GET["date_from"] ?? date("Y-m-d", strtotime("-7 days")); $date_to = $_GET["date_to"] ?? date("Y-m-d"); $ip_filter = $_GET["ip"] ?? ""; $sql = "SELECT * FROM visits WHERE visit_date BETWEEN :from AND :to"; $params = ["from" => $date_from, "to" => $date_to]; if($ip_filter) { $sql .= " AND visitor_ip LIKE :ip"; $params["ip"] = "%$ip_filter%"; } $sql .= " ORDER BY created_at DESC"; $stmt = $pdo->prepare($sql); $stmt->execute($params); $visits = $stmt->fetchAll(PDO::FETCH_ASSOC); $total_visits = count($visits); $unique_ips = count(array_unique(array_column($visits, "visitor_ip"))); ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1></div><div class="row mb-3"><div class="col-md-3"><div class="card text-white bg-info"><div class="card-body"><h5 class="card-title"><?= __("total_visits") ?></h5><p class="display-6"><?= $total_visits ?></p></div></div></div><div class="col-md-3"><div class="card text-white bg-success"><div class="card-body"><h5 class="card-title"><?= __("unique_ips") ?></h5><p class="display-6"><?= $unique_ips ?></p></div></div></div></div><form method="get" class="row g-3 mb-4"><div class="col-auto"><label class="form-label"><?= __("from") ?>:</label><input type="date" class="form-control" name="date_from" value="<?= $date_from ?>"></div><div class="col-auto"><label class="form-label"><?= __("to") ?>:</label><input type="date" class="form-control" name="date_to" value="<?= $date_to ?>"></div><div class="col-auto"><label class="form-label">IP</label><input type="text" class="form-control" name="ip" placeholder="часть IP" value="<?= htmlspecialchars($ip_filter) ?>"></div><div class="col-auto align-self-end"><button type="submit" class="btn btn-primary"><?= __("filter") ?></button><a href="visitors.php" class="btn btn-secondary ms-2"><?= __("reset") ?></a></div></form><table class="table table-striped"><thead><tr><th><?= __("time") ?></th><th><?= __("ip") ?></th><th><?= __("page") ?></th><th><?= __("user_agent") ?></th></tr></thead><tbody><?php foreach($visits as $v): ?><tr><td><?= htmlspecialchars($v["created_at"]) ?></td><td><?= htmlspecialchars($v["visitor_ip"]) ?></td><td><?= htmlspecialchars($v["page_url"]) ?></td><td><?= htmlspecialchars($v["user_agent"]) ?></td></tr><?php endforeach; ?></tbody></table></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
 VISITORS
 
-# 6.12 settings.php (без экранирования $, как в рабочей версии)
+# 6.12 settings.php (исправлены неопределённые константы)
 next_step "Создание страницы настроек (settings.php)"
 create_php_file "$ADMIN_DIR/settings.php" <<'EOF'
 <?php
 require_once "includes/auth.php";
 requireAdmin();
 
-$site_name = getSetting("site_name", SITE_NAME);
+$site_name = getSetting("site_name", "Мой сайт");
 $pageTitle = "Настройки";
 
 $settings = [];
@@ -751,11 +751,11 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 <form method="post">
                     <div class="mb-3">
                         <label for="site_name" class="form-label">Название сайта</label>
-                        <input type="text" class="form-control" id="site_name" name="site_name" value="<?= htmlspecialchars($settings["site_name"] ?? SITE_NAME) ?>">
+                        <input type="text" class="form-control" id="site_name" name="site_name" value="<?= htmlspecialchars($settings["site_name"] ?? getSetting("site_name", "Мой сайт")) ?>">
                     </div>
                     <div class="mb-3">
                         <label for="admin_email" class="form-label">Email администратора</label>
-                        <input type="email" class="form-control" id="admin_email" name="admin_email" value="<?= htmlspecialchars($settings["admin_email"] ?? ADMIN_EMAIL) ?>">
+                        <input type="email" class="form-control" id="admin_email" name="admin_email" value="<?= htmlspecialchars($settings["admin_email"] ?? getSetting("admin_email", "")) ?>">
                     </div>
                     <div class="mb-3">
                         <label for="theme" class="form-label">Тема админки</label>
