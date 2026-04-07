@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 3.6 (исправлено дублирование кода Nginx, логика восстановления)
+# Версия: 3.7 (исправлена логика проверки Nginx, восстановление)
 # =====================================================================
 
 set -euo pipefail
@@ -88,7 +88,7 @@ if [[ -z "$NGINX_LOCAL_PORT" ]]; then
     log_only "Выбран локальный порт для Nginx: $NGINX_LOCAL_PORT"
 fi
 
-# --- Модификация конфигурации Nginx (без дублирования) ---
+# --- Модификация конфигурации Nginx (исправленная логика) ---
 NGINX_CONF="/etc/nginx/sites-available/$DOMAIN"
 if [[ ! -f "$NGINX_CONF" ]]; then
     log "${RED}Конфигурация Nginx для $DOMAIN не найдена. Сначала выполните cms.sh.${NC}"
@@ -134,47 +134,57 @@ server {
 EOF
 }
 
-# Проверяем, настроен ли уже fallback
-if grep -q "listen 127.0.0.1:$NGINX_LOCAL_PORT" "$NGINX_CONF"; then
-    log "${YELLOW}Nginx уже настроен на локальный порт $NGINX_LOCAL_PORT. Проверяем работоспособность...${NC}"
-    if nginx -t >> "$LOG_FILE" 2>&1; then
-        log "${GREEN}Конфигурация Nginx корректна. Пропуск изменения.${NC}"
-    else
-        log "${RED}Конфигурация Nginx содержит ошибки, несмотря на наличие fallback.${NC}"
-        nginx -t 2>&1 | tee -a "$LOG_FILE"
-        # Пытаемся восстановить из резервной копии
-        if [[ -f "$NGINX_CONF.bak" ]]; then
-            log "${YELLOW}Восстанавливаем конфигурацию из резервной копии.${NC}"
-            mv "$NGINX_CONF.bak" "$NGINX_CONF"
-        else
-            log "${YELLOW}Резервная копия не найдена. Генерируем новую конфигурацию.${NC}"
-            cp "$NGINX_CONF" "$NGINX_CONF.bak" 2>/dev/null || true
-            generate_nginx_config
-        fi
+# Проверяем текущую конфигурацию на валидность
+if nginx -t 2>/dev/null; then
+    log "${GREEN}Конфигурация Nginx корректна.${NC}"
+    # Если конфигурация валидна, но fallback не настроен – перенастраиваем
+    if ! grep -q "listen 127.0.0.1:$NGINX_LOCAL_PORT" "$NGINX_CONF"; then
+        log "${YELLOW}Fallback не настроен, но конфигурация валидна. Создаём резервную копию и перенастраиваем.${NC}"
+        cp "$NGINX_CONF" "$NGINX_CONF.bak"
+        generate_nginx_config
         if nginx -t >> "$LOG_FILE" 2>&1; then
             systemctl reload nginx
-            log "${GREEN}Конфигурация Nginx исправлена и перезагружена.${NC}"
+            log "${GREEN}Конфигурация Nginx обновлена для fallback.${NC}"
         else
-            log "${RED}Не удалось исправить конфигурацию Nginx. Выход.${NC}"
-            nginx -t 2>&1 | tee -a "$LOG_FILE"
+            log "${RED}Ошибка при обновлении конфигурации. Восстанавливаем.${NC}"
+            mv "$NGINX_CONF.bak" "$NGINX_CONF"
+            systemctl reload nginx
             exit 1
         fi
+    else
+        log "${GREEN}Fallback уже настроен, конфигурация корректна. Пропускаем.${NC}"
     fi
 else
-    # Fallback не настроен – создаём новую конфигурацию
-    log "${YELLOW}Настройка Nginx для работы через локальный порт $NGINX_LOCAL_PORT...${NC}"
-    cp "$NGINX_CONF" "$NGINX_CONF.bak"
-    generate_nginx_config
-    if nginx -t >> "$LOG_FILE" 2>&1; then
-        systemctl reload nginx
-        log "${GREEN}Конфигурация Nginx обновлена: сайт слушает на 127.0.0.1:$NGINX_LOCAL_PORT.${NC}"
-    else
-        log "${RED}Ошибка в конфигурации Nginx:${NC}"
-        nginx -t 2>&1 | tee -a "$LOG_FILE"
-        log "${RED}Восстанавливаем резервную копию.${NC}"
+    log "${RED}Текущая конфигурация Nginx невалидна. Пытаемся восстановить.${NC}"
+    nginx -t 2>&1 | tee -a "$LOG_FILE"
+    # Пытаемся восстановить из резервной копии
+    if [[ -f "$NGINX_CONF.bak" ]]; then
+        log "${YELLOW}Восстанавливаем из резервной копии.${NC}"
         mv "$NGINX_CONF.bak" "$NGINX_CONF"
-        systemctl reload nginx
-        exit 1
+        if nginx -t >> "$LOG_FILE" 2>&1; then
+            systemctl reload nginx
+            log "${GREEN}Конфигурация восстановлена.${NC}"
+        else
+            log "${RED}Резервная копия тоже невалидна. Генерируем новую конфигурацию.${NC}"
+            generate_nginx_config
+            if nginx -t >> "$LOG_FILE" 2>&1; then
+                systemctl reload nginx
+                log "${GREEN}Сгенерирована новая конфигурация.${NC}"
+            else
+                log "${RED}Не удалось создать валидную конфигурацию. Выход.${NC}"
+                exit 1
+            fi
+        fi
+    else
+        log "${YELLOW}Резервной копии нет. Генерируем новую конфигурацию.${NC}"
+        generate_nginx_config
+        if nginx -t >> "$LOG_FILE" 2>&1; then
+            systemctl reload nginx
+            log "${GREEN}Сгенерирована новая конфигурация.${NC}"
+        else
+            log "${RED}Не удалось создать валидную конфигурацию. Выход.${NC}"
+            exit 1
+        fi
     fi
 fi
 
