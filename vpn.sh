@@ -172,8 +172,14 @@ else
 fi
 ufw allow 443/tcp >> "$LOG_FILE" 2>&1
 ufw allow 443/udp >> "$LOG_FILE" 2>&1
-SUBSCRIPTION_PORT=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='subscriptionPort';" 2>/dev/null || echo "2096")
+
+# Порт подписок (по умолчанию 2096)
+SUBSCRIPTION_PORT=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='subscriptionPort';" 2>/dev/null)
+if [[ -z "$SUBSCRIPTION_PORT" ]]; then
+    SUBSCRIPTION_PORT="2096"
+fi
 ufw allow "$SUBSCRIPTION_PORT"/tcp >> "$LOG_FILE" 2>&1
+
 ufw reload >> "$LOG_FILE" 2>&1
 log "UFW настроен."
 
