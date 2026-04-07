@@ -694,105 +694,114 @@ create_php_file "$ADMIN_DIR/visitors.php" <<'VISITORS'
 VISITORS
 
 # 6.12 settings.php
-next_step "Создание settings.php"
-create_php_file "$ADMIN_DIR/settings.php" "<?php
-require_once \"includes/auth.php\";
+next_step "Создание страницы настроек (settings.php)"
+create_php_file "$ADMIN_DIR/settings.php" <<'EOF'
+<?php
+require_once "includes/auth.php";
 requireAdmin();
-\$site_name = getSetting(\"site_name\", SITE_NAME);
-\$pageTitle = __(\"settings\");
+
+\$site_name = getSetting("site_name", SITE_NAME);
+\$pageTitle = "Настройки";
+
 \$settings = [];
-\$stmt = \$pdo->query(\"SELECT \`key\`, \`value\` FROM settings\");
+\$stmt = \$pdo->query("SELECT `key`, `value` FROM settings");
 while (\$row = \$stmt->fetch(PDO::FETCH_ASSOC)) {
-    \$settings[\$row[\"key\"]] = \$row[\"value\"];
+    \$settings[\$row["key"]] = \$row["value"];
 }
-if (\$_SERVER[\"REQUEST_METHOD\"] === \"POST\") {
-    \$keys = [\"site_name\", \"admin_email\", \"admin_theme\", \"stats_retention\", \"admin_lang\", \"deepseek_api_key\", \"deepseek_model\", \"deepseek_max_tokens\"];
+
+if (\$_SERVER["REQUEST_METHOD"] === "POST") {
+    \$keys = ['site_name', 'admin_email', 'admin_theme', 'stats_retention', 'admin_lang', 'deepseek_api_key', 'deepseek_model', 'deepseek_max_tokens'];
     foreach (\$keys as \$key) {
         if (isset(\$_POST[\$key])) {
-            \$pdo->prepare(\"INSERT INTO settings (\`key\`, \`value\`) VALUES (?, ?) ON DUPLICATE KEY UPDATE \`value\` = VALUES(\`value\`)\")
-                ->execute([\$key, \$_POST[\$key]]);
+            \$value = \$_POST[\$key];
+            \$pdo->prepare("INSERT INTO settings (`key`, `value`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)")
+                ->execute([\$key, \$value]);
         }
     }
-    \$message = \"<div class=\\\"alert alert-success\\\">\" . __(\"settings_saved\") . \"</div>\";
-    \$stmt = \$pdo->query(\"SELECT \`key\`, \`value\` FROM settings\");
+    \$message = "<div class=\"alert alert-success\">Настройки сохранены</div>";
+    \$stmt = \$pdo->query("SELECT `key`, `value` FROM settings");
     \$settings = [];
     while (\$row = \$stmt->fetch(PDO::FETCH_ASSOC)) {
-        \$settings[\$row[\"key\"]] = \$row[\"value\"];
+        \$settings[\$row["key"]] = \$row["value"];
     }
 }
 ?>
 <!DOCTYPE html>
-<html lang=\"<?= currentLanguage() ?>\">
+<html lang="ru">
 <head>
-    <meta charset=\"UTF-8\">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?= htmlspecialchars(\$site_name) ?> | <?= \$pageTitle ?></title>
-    <link href=\"https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css\" rel=\"stylesheet\">
-    <link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css\">
-    <link rel=\"stylesheet\" href=\"/admin/css/admin.css\">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="/admin/css/admin.css">
 </head>
-<body class=\"theme-<?= getSetting(\"admin_theme\", \"light\") ?>\">
-    <?php include \"includes/header.php\"; ?>
-    <div class=\"container-fluid\">
-        <div class=\"row\">
-            <?php include \"includes/sidebar.php\"; ?>
-            <main class=\"col-md-9 ms-sm-auto col-lg-10 px-md-4\">
-                <div class=\"d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom\">
-                    <h1 class=\"h2\"><?= \$pageTitle ?></h1>
+<body class="theme-<?= getSetting("admin_theme", "light") ?>">
+    <?php include "includes/header.php"; ?>
+    <div class="container-fluid">
+        <div class="row">
+            <?php include "includes/sidebar.php"; ?>
+            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
+                <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+                    <h1 class="h2"><?= \$pageTitle ?></h1>
                 </div>
+
                 <?php if (isset(\$message)) echo \$message; ?>
-                <form method=\"post\">
-                    <div class=\"mb-3\">
-                        <label class=\"form-label\"><?= __(\"site_name\") ?></label>
-                        <input type=\"text\" class=\"form-control\" name=\"site_name\" value=\"<?= htmlspecialchars(\$settings[\"site_name\"] ?? SITE_NAME) ?>\">
+
+                <form method="post">
+                    <div class="mb-3">
+                        <label for="site_name" class="form-label">Название сайта</label>
+                        <input type="text" class="form-control" id="site_name" name="site_name" value="<?= htmlspecialchars(\$settings["site_name"] ?? SITE_NAME) ?>">
                     </div>
-                    <div class=\"mb-3\">
-                        <label class=\"form-label\"><?= __(\"admin_email\") ?></label>
-                        <input type=\"email\" class=\"form-control\" name=\"admin_email\" value=\"<?= htmlspecialchars(\$settings[\"admin_email\"] ?? ADMIN_EMAIL) ?>\">
+                    <div class="mb-3">
+                        <label for="admin_email" class="form-label">Email администратора</label>
+                        <input type="email" class="form-control" id="admin_email" name="admin_email" value="<?= htmlspecialchars(\$settings["admin_email"] ?? ADMIN_EMAIL) ?>">
                     </div>
-                    <div class=\"mb-3\">
-                        <label class=\"form-label\"><?= __(\"admin_theme\") ?></label>
-                        <select class=\"form-select\" name=\"admin_theme\">
-                            <option value=\"light\" <?= (\$settings[\"admin_theme\"] ?? \"light\") == \"light\" ? \"selected\" : \"\" ?>><?= __(\"light\") ?></option>
-                            <option value=\"dark\" <?= (\$settings[\"admin_theme\"] ?? \"\") == \"dark\" ? \"selected\" : \"\" ?>><?= __(\"dark\") ?></option>
+                    <div class="mb-3">
+                        <label for="theme" class="form-label">Тема админки</label>
+                        <select class="form-select" id="theme" name="admin_theme">
+                            <option value="light" <?= (\$settings["admin_theme"] ?? "light") == "light" ? "selected" : "" ?>>Светлая</option>
+                            <option value="dark" <?= (\$settings["admin_theme"] ?? "") == "dark" ? "selected" : "" ?>>Тёмная</option>
                         </select>
                     </div>
-                    <div class=\"mb-3\">
-                        <label class=\"form-label\"><?= __(\"stats_retention\") ?></label>
-                        <input type=\"number\" class=\"form-control\" name=\"stats_retention\" value=\"<?= htmlspecialchars(\$settings[\"stats_retention\"] ?? 30) ?>\" min=\"1\" max=\"365\">
+                    <div class="mb-3">
+                        <label for="stats_retention" class="form-label">Срок хранения статистики (дней)</label>
+                        <input type="number" class="form-control" id="stats_retention" name="stats_retention" value="<?= htmlspecialchars(\$settings["stats_retention"] ?? 30) ?>" min="1" max="365">
                     </div>
-                    <div class=\"mb-3\">
-                        <label class=\"form-label\"><?= __(\"admin_lang\") ?></label>
-                        <select class=\"form-select\" name=\"admin_lang\">
-                            <option value=\"ru\" <?= (\$settings[\"admin_lang\"] ?? \"ru\") == \"ru\" ? \"selected\" : \"\" ?>>Русский</option>
-                            <option value=\"en\" <?= (\$settings[\"admin_lang\"] ?? \"\") == \"en\" ? \"selected\" : \"\" ?>>English</option>
+                    <div class="mb-3">
+                        <label for="admin_lang" class="form-label">Язык админки</label>
+                        <select class="form-select" id="admin_lang" name="admin_lang">
+                            <option value="ru" <?= (\$settings["admin_lang"] ?? "ru") == "ru" ? "selected" : "" ?>>Русский</option>
+                            <option value="en" <?= (\$settings["admin_lang"] ?? "") == "en" ? "selected" : "" ?>>English</option>
                         </select>
                     </div>
                     <hr>
-                    <h4 class=\"mt-4\">DeepSeek AI Settings</h4>
-                    <div class=\"mb-3\">
-                        <label class=\"form-label\">API Key DeepSeek</label>
-                        <input type=\"password\" class=\"form-control\" name=\"deepseek_api_key\" value=\"<?= htmlspecialchars(\$settings[\"deepseek_api_key\"] ?? \"\") ?>\">
-                        <div class=\"form-text\">Получите ключ на platform.deepseek.com</div>
+                    <h4 class="mt-4">DeepSeek AI Settings</h4>
+                    <div class="mb-3">
+                        <label for="deepseek_api_key" class="form-label">API Key DeepSeek</label>
+                        <input type="password" class="form-control" id="deepseek_api_key" name="deepseek_api_key" value="<?= htmlspecialchars(\$settings["deepseek_api_key"] ?? "") ?>">
+                        <div class="form-text">Получите ключ на platform.deepseek.com</div>
                     </div>
-                    <div class=\"mb-3\">
-                        <label class=\"form-label\">Модель</label>
-                        <select class=\"form-select\" name=\"deepseek_model\">
-                            <option value=\"deepseek-chat\" <?= (\$settings[\"deepseek_model\"] ?? \"deepseek-chat\") == \"deepseek-chat\" ? \"selected\" : \"\" ?>>DeepSeek Chat</option>
-                            <option value=\"deepseek-coder\" <?= (\$settings[\"deepseek_model\"] ?? \"\") == \"deepseek-coder\" ? \"selected\" : \"\" ?>>DeepSeek Coder</option>
+                    <div class="mb-3">
+                        <label for="deepseek_model" class="form-label">Модель</label>
+                        <select class="form-select" id="deepseek_model" name="deepseek_model">
+                            <option value="deepseek-chat" <?= (\$settings["deepseek_model"] ?? "deepseek-chat") == "deepseek-chat" ? "selected" : "" ?>>DeepSeek Chat</option>
+                            <option value="deepseek-coder" <?= (\$settings["deepseek_model"] ?? "") == "deepseek-coder" ? "selected" : "" ?>>DeepSeek Coder</option>
                         </select>
                     </div>
-                    <div class=\"mb-3\">
-                        <label class=\"form-label\">Max tokens</label>
-                        <input type=\"number\" class=\"form-control\" name=\"deepseek_max_tokens\" value=\"<?= htmlspecialchars(\$settings[\"deepseek_max_tokens\"] ?? 2000) ?>\" min=\"100\" max=\"8000\">
+                    <div class="mb-3">
+                        <label for="deepseek_max_tokens" class="form-label">Max tokens</label>
+                        <input type="number" class="form-control" id="deepseek_max_tokens" name="deepseek_max_tokens" value="<?= htmlspecialchars(\$settings["deepseek_max_tokens"] ?? 2000) ?>" min="100" max="8000">
                     </div>
-                    <button type=\"submit\" class=\"btn btn-primary\"><?= __(\"save\") ?></button>
+                    <button type="submit" class="btn btn-primary">Сохранить</button>
                 </form>
             </main>
         </div>
     </div>
-    <script src=\"https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js\"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
-</html>"
+</html>
+EOF
 chown www-data:www-data "$ADMIN_DIR/settings.php"
 chmod 644 "$ADMIN_DIR/settings.php"
 log_only "settings.php создан."
