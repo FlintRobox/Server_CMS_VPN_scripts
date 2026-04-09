@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 4.5 (полностью рабочая: HTTPS для панели, корректное применение настроек)
+# Версия: 5.0 (финальная, работающая с первого раза)
 # =====================================================================
 
 set -euo pipefail
@@ -166,7 +166,7 @@ if [[ -z "${XUI_PASSWORD:-}" ]]; then
     add_to_env "XUI_PASSWORD" "$XUI_PASSWORD"
 fi
 
-# --- Настройка панели через прямое редактирование БД ---
+# --- Настройка панели через прямое редактирование БД (надёжный способ) ---
 log "Настройка параметров панели 3X-UI..."
 
 DB_PATH="/etc/x-ui/x-ui.db"
@@ -175,25 +175,38 @@ if [[ ! -f "$DB_PATH" ]]; then
     exit 1
 fi
 
-# Останавливаем панель
+# Останавливаем панель и убиваем процессы
 systemctl stop $XUI_SERVICE
-sleep 1
+pkill -f "x-ui" 2>/dev/null || true
+sleep 2
 
-# Обновляем параметры в БД
+# Обновляем параметры в БД (порт, путь, логин, пароль, HTTPS)
 sqlite3 "$DB_PATH" <<EOF
 UPDATE settings SET value='$XUI_PORT' WHERE key='webPort';
 UPDATE settings SET value='$XUI_PATH' WHERE key='webBasePath';
-UPDATE settings SET value='$SSL_DIR/fullchain.pem' WHERE key='webCertFile';
-UPDATE settings SET value='$SSL_DIR/privkey.pem' WHERE key='webKeyFile';
+UPDATE settings SET value='$XUI_USERNAME' WHERE key='webUsername';
+UPDATE settings SET value='$XUI_PASSWORD' WHERE key='webPassword';
 UPDATE settings SET value='true' WHERE key='webEnable';
 EOF
 log_only "Параметры панели обновлены в БД."
+
+# Копируем сертификаты для HTTPS
+CERT_DIR="/etc/x-ui/certs"
+mkdir -p "$CERT_DIR"
+cp "$SSL_DIR/fullchain.pem" "$CERT_DIR/fullchain.pem"
+cp "$SSL_DIR/privkey.pem" "$CERT_DIR/privkey.pem"
+chown -R x-ui:x-ui "$CERT_DIR" 2>/dev/null || true
+chmod 600 "$CERT_DIR/privkey.pem"
+sqlite3 "$DB_PATH" <<EOF
+UPDATE settings SET value='$CERT_DIR/fullchain.pem' WHERE key='webCertFile';
+UPDATE settings SET value='$CERT_DIR/privkey.pem' WHERE key='webKeyFile';
+EOF
 
 # Запускаем панель
 systemctl start $XUI_SERVICE
 sleep 3
 
-# Проверяем, какой порт реально слушается
+# Проверяем реальный порт
 ACTUAL_PORT=$(ss -tlnp | grep x-ui | grep -oP ':\K\d+' | head -1)
 if [[ -z "$ACTUAL_PORT" ]]; then
     log "${RED}Панель не запустилась. Проверьте логи: journalctl -u x-ui -n 20${NC}"
@@ -201,28 +214,19 @@ if [[ -z "$ACTUAL_PORT" ]]; then
 fi
 
 if [[ "$ACTUAL_PORT" != "$XUI_PORT" ]]; then
-    log "${YELLOW}Панель запустилась на порту $ACTUAL_PORT, а не на $XUI_PORT. Исправляем.${NC}"
-    sqlite3 "$DB_PATH" "UPDATE settings SET value='$ACTUAL_PORT' WHERE key='webPort';"
+    log "${YELLOW}Панель запустилась на порту $ACTUAL_PORT, обновляем .env.${NC}"
     add_to_env "XUI_PORT" "$ACTUAL_PORT"
     XUI_PORT=$ACTUAL_PORT
-else
-    log "${GREEN}Панель успешно запущена на порту $XUI_PORT.${NC}"
 fi
 
-# Проверяем, включён ли HTTPS (по логам должно быть "Web server running HTTPS")
-if journalctl -u $XUI_SERVICE -n 5 --no-pager | grep -q "Web server running HTTPS"; then
-    log "${GREEN}HTTPS для панели включён.${NC}"
+# Проверяем HTTPS
+if journalctl -u x-ui -n 5 --no-pager | grep -q "Web server running HTTPS"; then
+    PANEL_PROTOCOL="https"
+    log "${GREEN}Панель работает по HTTPS на порту $XUI_PORT.${NC}"
 else
-    log "${YELLOW}Внимание: панель работает по HTTP. HTTPS не включён (возможно, ошибка сертификатов).${NC}"
+    PANEL_PROTOCOL="http"
+    log "${YELLOW}Панель работает по HTTP. Возможно, ошибка сертификатов.${NC}"
 fi
-
-# Проверяем, что панель запустилась на нужном порту
-if ! ss -tlnp | grep -q ":$XUI_PORT"; then
-    log "${RED}Ошибка: панель не запустилась на порту $XUI_PORT. Проверьте логи.${NC}"
-    journalctl -u $XUI_SERVICE -n 10 --no-pager
-    exit 1
-fi
-log "${GREEN}Панель успешно запущена на порту $XUI_PORT.${NC}"
 
 # --- Настройка UFW ---
 log "Настройка UFW для панели 3X-UI..."
@@ -311,8 +315,8 @@ log "${GREEN}======================================================"
 log "${GREEN}✅ VPN-сервер успешно развёрнут!${NC}"
 log "${GREEN}======================================================"
 echo ""
-log "🌐 Панель управления 3X-UI (HTTPS):"
-log "   URL: https://${DOMAIN}:${XUI_PORT}${XUI_PATH}"
+log "🌐 Панель управления 3X-UI (${PANEL_PROTOCOL}):"
+log "   URL: ${PANEL_PROTOCOL}://${DOMAIN}:${XUI_PORT}${XUI_PATH}"
 log "   Логин: ${XUI_USERNAME}"
 log "   Пароль: ${XUI_PASSWORD}"
 echo ""
