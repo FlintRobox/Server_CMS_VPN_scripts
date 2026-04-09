@@ -995,7 +995,7 @@ cat > "$ADMIN_DIR/file-picker.html" <<'PICKER'
 <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Выбор файла</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><style>.file-item{cursor:pointer}.file-item:hover{background:#f0f0f0}.thumbnail{width:100px;height:auto;max-height:100px;object-fit:cover;margin-right:15px}</style></head><body><div class="container"><h2>Выберите файл</h2><div id="file-list" class="list-group"><div class="text-center"><div class="spinner-border"></div></div></div></div><script>function escapeHtml(str){return str.replace(/[&<>]/g,function(m){if(m==="&") return "&amp;"; if(m==="<") return "&lt;"; if(m===">") return "&gt;"; return m;});}fetch("/admin/file-list.php").then(r=>r.json()).then(files=>{const c=document.getElementById("file-list");c.innerHTML="";if(files.length===0){c.innerHTML="<div class=\"alert alert-info\">Нет загруженных файлов</div>";return;}files.forEach(f=>{const d=document.createElement("div");d.className="list-group-item file-item";d.innerHTML=`<div class="row align-items-center"><div class="col-auto"><img src="${escapeHtml(f.path)}" class="thumbnail" onerror="this.style.display='none'"></div><div class="col"><strong>${escapeHtml(f.original_name)}</strong><br><small>${escapeHtml(f.type)} | ${(f.size/1024).toFixed(2)} KB</small><br><small>Загружен: ${escapeHtml(f.uploaded_at)}</small></div></div>`;d.addEventListener("click",()=>{window.parent.postMessage({mceAction:"FileSelected",url:f.path,title:f.original_name},"*");window.close();});c.appendChild(d);});}).catch(e=>{console.error(e);document.getElementById("file-list").innerHTML="<div class=\"alert alert-danger\">Ошибка</div>";});</script></body></html>
 PICKER
 
-# 6.23 analytics.php (исправлен: добавлена проверка успешности, поддержка вложенных файлов)
+# 6.23 analytics.php (с автоматической коррекцией прав)
 create_php_file "$ADMIN_DIR/analytics.php" <<'ANALYTICS'
 <?php
 require_once "includes/auth.php";
@@ -1017,90 +1017,97 @@ if (isset($pdo) && strpos($_SERVER["REQUEST_URI"], "/admin") !== 0) {
 }
 ?>';
 
-// Рекурсивный поиск файлов для инъекции
-function getFilesRecursive($dir, $exclude_dirs = ['admin', 'uploads', 'core', 'templates', 'tinymce', 'js', 'css']) {
-    $files = [];
-    $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, RecursiveDirectoryIterator::SKIP_DOTS));
-    foreach ($iterator as $file) {
-        if ($file->isFile()) {
-            $path = $file->getPathname();
-            $rel_path = str_replace($dir, '', $path);
-            $parts = explode('/', ltrim($rel_path, '/'));
-            if (in_array($parts[0], $exclude_dirs)) continue;
-            $ext = $file->getExtension();
-            if (in_array($ext, ['php', 'html', 'htm', 'phtml', 'inc'])) {
-                $files[] = $rel_path;
-            }
-        }
-    }
-    return $files;
-}
-
 if ($_SERVER["REQUEST_METHOD"] === "POST") {
     $action = $_POST["action"] ?? "";
-    $selected_files = $_POST["files"] ?? [];
-    if (!empty($selected_files) && in_array($action, ['inject', 'remove'])) {
-        $success = true;
-        foreach ($selected_files as $rel_file) {
-            $file_path = $root_dir . $rel_file;
-            if (!file_exists($file_path)) continue;
-            $ext = pathinfo($file_path, PATHINFO_EXTENSION);
-            $backup = $file_path . ".bak." . date("Ymd_His");
-            $content = file_get_contents($file_path);
-            if ($content === false) { $success = false; continue; }
-            if ($action === 'inject') {
-                if (in_array($ext, ['php', 'phtml', 'inc'])) {
-                    if (strpos($content, "INSERT INTO visits") === false) {
-                        if (preg_match("/^<\?php/", $content)) {
-                            $new_content = preg_replace("/^<\?php/", "<?php\n" . $tracker_php_code, $content);
-                        } else {
-                            $new_content = $tracker_php_code . "\n" . $content;
-                        }
-                        if (!copy($file_path, $backup)) { $success = false; continue; }
-                        if (file_put_contents($file_path, $new_content) === false) $success = false;
-                    }
-                } elseif (in_array($ext, ['html', 'htm'])) {
-                    if (strpos($content, "tracker.js") === false) {
-                        if (!copy($file_path, $backup)) { $success = false; continue; }
-                        if (preg_match("/<\/body\s*>/i", $content, $matches, PREG_OFFSET_CAPTURE)) {
-                            $pos = $matches[0][1];
-                            $new_content = substr_replace($content, $tracker_js_code . "\n" . $matches[0][0], $pos, strlen($matches[0][0]));
-                        } elseif (preg_match("/<\/html\s*>/i", $content, $matches, PREG_OFFSET_CAPTURE)) {
-                            $pos = $matches[0][1];
-                            $new_content = substr_replace($content, $tracker_js_code . "\n" . $matches[0][0], $pos, strlen($matches[0][0]));
-                        } else {
-                            $new_content = $content . "\n" . $tracker_js_code;
-                        }
-                        if (file_put_contents($file_path, $new_content) === false) $success = false;
-                    }
+    $files = $_POST["files"] ?? [];
+    $errors = [];
+    if ($action === "inject") {
+        foreach ($files as $file) {
+            $file_path = $root_dir . $file;
+            if (!file_exists($file_path)) {
+                $errors[] = "Файл $file не существует";
+                continue;
+            }
+            // Пытаемся сделать файл доступным для записи
+            if (!is_writable($file_path)) {
+                @chmod($file_path, 0644);
+                clearstatcache();
+                if (!is_writable($file_path)) {
+                    $errors[] = "Файл $file не доступен для записи (проверьте права)";
+                    continue;
                 }
-            } elseif ($action === 'remove') {
-                if (in_array($ext, ['php', 'phtml', 'inc'])) {
-                    $new_content = preg_replace("/<\?php\nif \(isset\(\$pdo\).*?}\n\?>/s", "", $content);
-                    if ($new_content !== $content) {
-                        if (!copy($file_path, $backup)) { $success = false; continue; }
-                        if (file_put_contents($file_path, $new_content) === false) $success = false;
+            }
+            $ext = pathinfo($file, PATHINFO_EXTENSION);
+            $backup = $file_path . ".bak." . date("Ymd_His");
+            copy($file_path, $backup);
+            $content = file_get_contents($file_path);
+            if (in_array($ext, ["php", "phtml", "inc"])) {
+                if (strpos($content, "INSERT INTO visits") === false) {
+                    if (preg_match("/^<\?php/", $content)) {
+                        $new_content = preg_replace("/^<\?php/", "<?php\n" . $tracker_php_code, $content);
+                    } else {
+                        $new_content = $tracker_php_code . "\n" . $content;
                     }
-                } elseif (in_array($ext, ['html', 'htm'])) {
-                    $new_content = preg_replace('/<script[^>]*src="\/js\/tracker\.js"[^>]*><\/script>/i', '', $content);
-                    if ($new_content !== $content) {
-                        if (!copy($file_path, $backup)) { $success = false; continue; }
-                        if (file_put_contents($file_path, $new_content) === false) $success = false;
+                    file_put_contents($file_path, $new_content);
+                }
+            } elseif (in_array($ext, ["html", "htm"])) {
+                if (strpos($content, "tracker.js") === false) {
+                    if (preg_match("/<\/body\s*>/i", $content, $matches, PREG_OFFSET_CAPTURE)) {
+                        $pos = $matches[0][1];
+                        $new_content = substr_replace($content, $tracker_js_code . "\n" . $matches[0][0], $pos, strlen($matches[0][0]));
+                    } elseif (preg_match("/<\/html\s*>/i", $content, $matches, PREG_OFFSET_CAPTURE)) {
+                        $pos = $matches[0][1];
+                        $new_content = substr_replace($content, $tracker_js_code . "\n" . $matches[0][0], $pos, strlen($matches[0][0]));
+                    } else {
+                        $new_content = $content . "\n" . $tracker_js_code;
                     }
+                    file_put_contents($file_path, $new_content);
                 }
             }
         }
-        if ($success) {
-            $message = "<div class=\"alert alert-success\">" . __($action === 'inject' ? "tracker_added" : "tracker_removed") . "</div>";
+        if (empty($errors)) {
+            $message = "<div class=\"alert alert-success\">" . __("tracker_added") . "</div>";
         } else {
-            $message = "<div class=\"alert alert-danger\">" . __("error") . " — некоторые файлы не были обработаны (проверьте права на запись).</div>";
+            $message = "<div class=\"alert alert-danger\">Ошибка при обработке файлов:<br>" . implode("<br>", $errors) . "</div>";
         }
-    } elseif ($action !== '') {
-        $message = "<div class=\"alert alert-warning\">Не выбраны файлы для обработки.</div>";
+    } elseif ($action === "remove") {
+        foreach ($files as $file) {
+            $file_path = $root_dir . $file;
+            if (!file_exists($file_path)) continue;
+            if (!is_writable($file_path)) {
+                @chmod($file_path, 0644);
+                clearstatcache();
+                if (!is_writable($file_path)) {
+                    $errors[] = "Файл $file не доступен для записи";
+                    continue;
+                }
+            }
+            $ext = pathinfo($file, PATHINFO_EXTENSION);
+            $content = file_get_contents($file_path);
+            if (in_array($ext, ["php", "phtml", "inc"])) {
+                $new_content = preg_replace("/<\?php\nif \(isset\(\$pdo\).*?}\n\?>/s", "", $content);
+                if ($new_content !== $content) file_put_contents($file_path, $new_content);
+            } elseif (in_array($ext, ["html", "htm"])) {
+                $new_content = str_replace($tracker_js_code, "", $content);
+                if ($new_content !== $content) file_put_contents($file_path, $new_content);
+            }
+        }
+        if (empty($errors)) {
+            $message = "<div class=\"alert alert-success\">" . __("tracker_removed") . "</div>";
+        } else {
+            $message = "<div class=\"alert alert-danger\">Ошибка при удалении трекера:<br>" . implode("<br>", $errors) . "</div>";
+        }
     }
 }
 
-$files_list = getFilesRecursive($root_dir);
+$files_list = [];
+$excluded = ["admin", "uploads", "core", "templates", "tinymce", "js", "css"];
+foreach (glob($root_dir . "*") as $item) {
+    $basename = basename($item);
+    if (is_file($item) && !in_array($basename, $excluded) && in_array(pathinfo($item, PATHINFO_EXTENSION), ["php", "html", "htm", "phtml", "inc"])) {
+        $files_list[] = $basename;
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="<?= currentLanguage() ?>">
@@ -1121,15 +1128,16 @@ $files_list = getFilesRecursive($root_dir);
                     <h1 class="h2"><?= $pageTitle ?></h1>
                 </div>
                 <?= $message ?>
+                
                 <div class="card mb-4">
                     <div class="card-header"><i class="bi bi-magic"></i> <?= __("inject_tracker") ?></div>
                     <div class="card-body">
                         <form method="post">
                             <div class="mb-3">
                                 <label class="form-label"><?= __("select_files") ?></label>
-                                <select class="form-select" name="files[]" multiple size="12">
+                                <select class="form-select" name="files[]" multiple size="10">
                                     <?php foreach ($files_list as $f): ?>
-                                        <option value="<?= htmlspecialchars(ltrim($f, '/')) ?>"><?= htmlspecialchars($f) ?></option>
+                                        <option value="<?= htmlspecialchars($f) ?>"><?= htmlspecialchars($f) ?></option>
                                     <?php endforeach; ?>
                                 </select>
                                 <div class="form-text">Удерживайте Ctrl для выбора нескольких файлов.</div>
@@ -1139,6 +1147,7 @@ $files_list = getFilesRecursive($root_dir);
                         </form>
                     </div>
                 </div>
+
                 <div class="card mb-4">
                     <div class="card-header"><i class="bi bi-filetype-php"></i> PHP – <?= __("manual_instruction") ?></div>
                     <div class="card-body">
@@ -1146,6 +1155,7 @@ $files_list = getFilesRecursive($root_dir);
                         <pre class="bg-light p-3 border rounded"><code><?= htmlspecialchars($tracker_php_code) ?></code></pre>
                     </div>
                 </div>
+
                 <div class="card">
                     <div class="card-header"><i class="bi bi-filetype-html"></i> HTML/JS – <?= __("manual_instruction") ?></div>
                     <div class="card-body">
