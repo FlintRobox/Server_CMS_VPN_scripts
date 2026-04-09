@@ -175,13 +175,22 @@ if [[ ! -f "$DB_PATH" ]]; then
     exit 1
 fi
 
-# Останавливаем панель и убиваем процессы
-systemctl stop $XUI_SERVICE
+# Останавливаем панель и убиваем процессы (с проверкой)
+log "Останавливаем панель..."
+systemctl stop $XUI_SERVICE 2>/dev/null || true
 pkill -f "x-ui" 2>/dev/null || true
 sleep 2
 
+# Принудительно завершаем, если остались процессы
+if pgrep -f "x-ui" > /dev/null; then
+    log "${YELLOW}Процесс x-ui всё ещё работает. Принудительно завершаем...${NC}"
+    pkill -9 -f "x-ui" 2>/dev/null || true
+    sleep 1
+fi
+
 # Обновляем параметры в БД (порт, путь, логин, пароль, HTTPS)
-sqlite3 "$DB_PATH" <<EOF
+log "Обновляем параметры в БД..."
+sqlite3 "$DB_PATH" <<EOF || { log "${RED}Ошибка при обновлении БД.${NC}"; exit 1; }
 UPDATE settings SET value='$XUI_PORT' WHERE key='webPort';
 UPDATE settings SET value='$XUI_PATH' WHERE key='webBasePath';
 UPDATE settings SET value='$XUI_USERNAME' WHERE key='webUsername';
@@ -193,33 +202,39 @@ log_only "Параметры панели обновлены в БД."
 # Копируем сертификаты для HTTPS
 CERT_DIR="/etc/x-ui/certs"
 mkdir -p "$CERT_DIR"
-cp "$SSL_DIR/fullchain.pem" "$CERT_DIR/fullchain.pem"
-cp "$SSL_DIR/privkey.pem" "$CERT_DIR/privkey.pem"
-chown -R x-ui:x-ui "$CERT_DIR" 2>/dev/null || true
-chmod 600 "$CERT_DIR/privkey.pem"
-sqlite3 "$DB_PATH" <<EOF
+if [[ -f "$SSL_DIR/fullchain.pem" && -f "$SSL_DIR/privkey.pem" ]]; then
+    cp "$SSL_DIR/fullchain.pem" "$CERT_DIR/"
+    cp "$SSL_DIR/privkey.pem" "$CERT_DIR/"
+    chown -R x-ui:x-ui "$CERT_DIR" 2>/dev/null || true
+    chmod 600 "$CERT_DIR/privkey.pem"
+    sqlite3 "$DB_PATH" <<EOF
 UPDATE settings SET value='$CERT_DIR/fullchain.pem' WHERE key='webCertFile';
 UPDATE settings SET value='$CERT_DIR/privkey.pem' WHERE key='webKeyFile';
 EOF
+    log_only "Сертификаты скопированы и настроены."
+else
+    log "${YELLOW}Сертификаты не найдены. HTTPS для панели не будет включён.${NC}"
+fi
 
 # Запускаем панель
+log "Запускаем панель..."
 systemctl start $XUI_SERVICE
 sleep 3
 
 # Проверяем реальный порт
 ACTUAL_PORT=$(ss -tlnp | grep x-ui | grep -oP ':\K\d+' | head -1)
 if [[ -z "$ACTUAL_PORT" ]]; then
-    log "${RED}Панель не запустилась. Проверьте логи.${NC}"
+    log "${RED}Панель не запустилась. Проверьте логи: journalctl -u x-ui -n 20${NC}"
     exit 1
 fi
 
 if [[ "$ACTUAL_PORT" != "$XUI_PORT" ]]; then
-    log "${YELLOW}Панель запустилась на порту $ACTUAL_PORT, а не на $XUI_PORT. Обновляем настройки.${NC}"
+    log "${YELLOW}Панель запустилась на порту $ACTUAL_PORT, а не на $XUI_PORT. Обновляем .env.${NC}"
     add_to_env "XUI_PORT" "$ACTUAL_PORT"
     XUI_PORT=$ACTUAL_PORT
 fi
 
-# Обновляем правила UFW для реального порта
+# Открываем порт в UFW
 ufw allow "$XUI_PORT"/tcp >> "$LOG_FILE" 2>&1
 ufw reload >> "$LOG_FILE" 2>&1
 log "Порт $XUI_PORT открыт в UFW."
@@ -227,10 +242,13 @@ log "Порт $XUI_PORT открыт в UFW."
 # Проверяем HTTPS
 if journalctl -u x-ui -n 5 --no-pager | grep -q "Web server running HTTPS"; then
     PANEL_PROTOCOL="https"
+    log "${GREEN}Панель работает по HTTPS на порту $XUI_PORT.${NC}"
 else
     PANEL_PROTOCOL="http"
     log "${YELLOW}Панель работает по HTTP. Возможно, ошибка сертификатов.${NC}"
 fi
+
+log "${GREEN}Панель успешно запущена.${NC}"
 
 # --- Настройка UFW ---
 log "Настройка UFW для панели 3X-UI..."
