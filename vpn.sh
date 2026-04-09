@@ -209,20 +209,24 @@ sleep 3
 # Проверяем реальный порт
 ACTUAL_PORT=$(ss -tlnp | grep x-ui | grep -oP ':\K\d+' | head -1)
 if [[ -z "$ACTUAL_PORT" ]]; then
-    log "${RED}Панель не запустилась. Проверьте логи: journalctl -u x-ui -n 20${NC}"
+    log "${RED}Панель не запустилась. Проверьте логи.${NC}"
     exit 1
 fi
 
 if [[ "$ACTUAL_PORT" != "$XUI_PORT" ]]; then
-    log "${YELLOW}Панель запустилась на порту $ACTUAL_PORT, обновляем .env.${NC}"
+    log "${YELLOW}Панель запустилась на порту $ACTUAL_PORT, а не на $XUI_PORT. Обновляем настройки.${NC}"
     add_to_env "XUI_PORT" "$ACTUAL_PORT"
     XUI_PORT=$ACTUAL_PORT
 fi
 
+# Обновляем правила UFW для реального порта
+ufw allow "$XUI_PORT"/tcp >> "$LOG_FILE" 2>&1
+ufw reload >> "$LOG_FILE" 2>&1
+log "Порт $XUI_PORT открыт в UFW."
+
 # Проверяем HTTPS
 if journalctl -u x-ui -n 5 --no-pager | grep -q "Web server running HTTPS"; then
     PANEL_PROTOCOL="https"
-    log "${GREEN}Панель работает по HTTPS на порту $XUI_PORT.${NC}"
 else
     PANEL_PROTOCOL="http"
     log "${YELLOW}Панель работает по HTTP. Возможно, ошибка сертификатов.${NC}"
