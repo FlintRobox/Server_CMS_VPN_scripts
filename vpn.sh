@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 8.0 (поддержка двух режимов: с сайтом и автономный VPN)
+# Версия: 8.1 (добавлен выбор SSL в автономном режиме)
 # =====================================================================
 
 set -euo pipefail
@@ -19,7 +19,7 @@ init_force_mode "$@"
 XUI_DB="/etc/x-ui/x-ui.db"
 XUI_BIN="/usr/local/x-ui/x-ui"
 FALLBACK_PORT_START=10443
-TOTAL_STEPS=9
+TOTAL_STEPS=10
 CURRENT_STEP=0
 
 # --- Проверка наличия необходимых утилит ---
@@ -39,7 +39,6 @@ next_step() {
 # ----------------------------------------------------------------------
 next_step "Определение режима установки"
 
-# Загружаем .env, если есть; иначе создадим позже
 ENV_FILE="$SCRIPT_DIR/.env"
 if [[ -f "$ENV_FILE" ]]; then
     set -a
@@ -47,14 +46,12 @@ if [[ -f "$ENV_FILE" ]]; then
     set +a
 fi
 
-# Функция проверки наличия сайта
 is_site_installed() {
     local domain="${1:-}"
     [[ -n "$domain" ]] || return 1
     [[ -f "/etc/nginx/sites-available/$domain" ]] && [[ -d "/var/www/$domain" ]]
 }
 
-# Определяем домен: из .env или запрашиваем
 if [[ -n "${DOMAIN:-}" ]] && is_site_installed "$DOMAIN"; then
     MODE="integrated"
     log "${GREEN}Обнаружен установленный сайт для домена $DOMAIN. Режим интеграции.${NC}"
@@ -76,17 +73,113 @@ ADMIN_EMAIL="${ADMIN_EMAIL}"
 SITE_DIR="/var/www/$DOMAIN"
 
 # ----------------------------------------------------------------------
-# Автономный режим: подготовка Nginx и SSL
+# Автономный режим: выбор SSL и настройка Nginx
 # ----------------------------------------------------------------------
 if [[ "$MODE" == "standalone" ]]; then
-    next_step "Подготовка веб-окружения для домена $DOMAIN"
+    next_step "Настройка SSL для домена $DOMAIN"
 
-    # Убедимся, что Nginx установлен
+    # Запрос необходимости SSL
+    DEFAULT_NEED_SSL="${NEED_SSL:-y}"
+    while true; do
+        read -p "Требуется ли SSL-сертификат? (y/n) [$DEFAULT_NEED_SSL]: " ssl_answer
+        if [[ -z "$ssl_answer" ]]; then
+            ssl_answer="$DEFAULT_NEED_SSL"
+        fi
+        if [[ "$ssl_answer" =~ ^([YyДд]|[Yy]es|YES)$ ]]; then
+            NEED_SSL="y"
+            break
+        elif [[ "$ssl_answer" =~ ^([NnНн]|[Nn]o|NO)$ ]]; then
+            NEED_SSL="n"
+            break
+        else
+            echo -e "${RED}Пожалуйста, введите y или n.${NC}" >&2
+        fi
+    done
+    add_to_env "NEED_SSL" "$NEED_SSL"
+
+    SSL_TYPE=""
+    if [[ "$NEED_SSL" == "y" ]]; then
+        DEFAULT_SSL_TYPE="${SSL_TYPE:-letsencrypt}"
+        while true; do
+            read -p "Использовать существующий сертификат или получить через Let's Encrypt? (existing/letsencrypt) [$DEFAULT_SSL_TYPE]: " ssl_type_answer
+            if [[ -z "$ssl_type_answer" ]]; then
+                ssl_type_answer="$DEFAULT_SSL_TYPE"
+            fi
+            if [[ "$ssl_type_answer" == "existing" || "$ssl_type_answer" == "letsencrypt" ]]; then
+                SSL_TYPE="$ssl_type_answer"
+                break
+            else
+                echo -e "${RED}Введите 'existing' или 'letsencrypt'.${NC}" >&2
+            fi
+        done
+        add_to_env "SSL_TYPE" "$SSL_TYPE"
+
+        if [[ "$SSL_TYPE" == "existing" ]]; then
+            # Запрос папки с сертификатами
+            DEFAULT_CERT_DIR="${SSL_CERT_DIR:-}"
+            if [[ -z "$DEFAULT_CERT_DIR" ]]; then
+                if [[ -d "/root/${DOMAIN}" ]]; then
+                    DEFAULT_CERT_DIR="/root/${DOMAIN}"
+                elif [[ -d "/root/ssl/${DOMAIN}" ]]; then
+                    DEFAULT_CERT_DIR="/root/ssl/${DOMAIN}"
+                fi
+            fi
+            read -p "Введите путь к папке с файлами сертификатов (должны быть .key, .crt/.cer, ca.cer/ca.crt) [$DEFAULT_CERT_DIR]: " CERT_DIR
+            if [[ -z "$CERT_DIR" ]]; then
+                CERT_DIR="$DEFAULT_CERT_DIR"
+            fi
+            while [[ ! -d "$CERT_DIR" ]]; do
+                echo -e "${RED}Папка $CERT_DIR не существует.${NC}" >&2
+                read -p "Введите путь к папке с сертификатами: " CERT_DIR
+            done
+
+            KEY_FILE=$(find "$CERT_DIR" -maxdepth 1 -type f \( -name "*.key" -o -name "*.pem" \) | grep -i "key" | head -n1)
+            [[ -z "$KEY_FILE" ]] && KEY_FILE=$(find "$CERT_DIR" -maxdepth 1 -type f -name "*.key" | head -n1)
+
+            CERT_FILE=$(find "$CERT_DIR" -maxdepth 1 -type f \( -name "*.cer" -o -name "*.crt" -o -name "*.pem" \) | grep -v "ca" | grep -v "key" | head -n1)
+            if [[ -z "$CERT_FILE" ]]; then
+                CERT_FILE=$(find "$CERT_DIR" -maxdepth 1 -type f -name "*.crt" | head -n1)
+            fi
+            [[ -z "$CERT_FILE" ]] && CERT_FILE=$(find "$CERT_DIR" -maxdepth 1 -type f -name "*.cer" | head -n1)
+
+            CA_FILE=$(find "$CERT_DIR" -maxdepth 1 -type f \( -name "ca.cer" -o -name "ca.crt" -o -name "*.ca" \) | head -n1)
+            if [[ -z "$CA_FILE" ]]; then
+                CA_FILE=$(find "$CERT_DIR" -maxdepth 1 -type f \( -name "*.cer" -o -name "*.crt" -o -name "*.pem" \) | grep -v -F "$KEY_FILE" | grep -v -F "$CERT_FILE" | head -n1)
+            fi
+
+            if [[ -z "$KEY_FILE" || -z "$CERT_FILE" ]]; then
+                echo -e "${RED}Не удалось найти ключ или сертификат в папке $CERT_DIR.${NC}" >&2
+                exit 1
+            fi
+
+            echo -e "${GREEN}Найдены файлы:${NC}"
+            echo "  Ключ: $KEY_FILE"
+            echo "  Сертификат: $CERT_FILE"
+            [[ -n "$CA_FILE" ]] && echo "  CA-цепочка: $CA_FILE"
+
+            SSL_TARGET="/etc/letsencrypt/live/$DOMAIN"
+            mkdir -p "$SSL_TARGET"
+            if [[ -n "$CA_FILE" ]]; then
+                cat "$CERT_FILE" "$CA_FILE" > "$SSL_TARGET/fullchain.pem"
+            else
+                cp "$CERT_FILE" "$SSL_TARGET/fullchain.pem"
+            fi
+            cp "$KEY_FILE" "$SSL_TARGET/privkey.pem"
+            chmod 644 "$SSL_TARGET/fullchain.pem"
+            chmod 600 "$SSL_TARGET/privkey.pem"
+            add_to_env "SSL_CERT_PATH" "$SSL_TARGET/fullchain.pem"
+            add_to_env "SSL_KEY_PATH" "$SSL_TARGET/privkey.pem"
+            add_to_env "SSL_CERT_DIR" "$CERT_DIR"
+            echo -e "${GREEN}Сертификаты сконвертированы и сохранены в $SSL_TARGET${NC}"
+        fi
+    fi
+
+    # Установка Nginx, если отсутствует
     if ! command -v nginx &>/dev/null; then
         apt update && apt install -y nginx >> "$LOG_FILE" 2>&1
     fi
 
-    # Создаём директорию сайта и простую индексную страницу
+    # Создание директории сайта и простой индексной страницы
     mkdir -p "$SITE_DIR"
     if [[ ! -f "$SITE_DIR/index.html" ]]; then
         cat > "$SITE_DIR/index.html" <<EOF
@@ -103,26 +196,28 @@ EOF
     fi
     chown -R www-data:www-data "$SITE_DIR" 2>/dev/null || true
 
-    # Получение SSL-сертификата, если его нет
+    # Получение SSL-сертификата, если выбран letsencrypt
     SSL_DIR="/etc/letsencrypt/live/$DOMAIN"
-    if [[ ! -f "$SSL_DIR/fullchain.pem" ]]; then
-        log "Получение SSL-сертификата Let's Encrypt..."
-        # Временно останавливаем Nginx для standalone режима certbot
-        systemctl stop nginx
-        if ! certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos --email "$ADMIN_EMAIL" >> "$LOG_FILE" 2>&1; then
-            log "${RED}Ошибка получения сертификата. Проверьте доступность домена и порта 80.${NC}"
+    if [[ "$NEED_SSL" == "y" && "$SSL_TYPE" == "letsencrypt" ]]; then
+        if [[ ! -f "$SSL_DIR/fullchain.pem" ]]; then
+            log "Получение SSL-сертификата Let's Encrypt..."
+            systemctl stop nginx
+            if ! certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos --email "$ADMIN_EMAIL" >> "$LOG_FILE" 2>&1; then
+                log "${RED}Ошибка получения сертификата. Проверьте, что домен $DOMAIN указывает на IP этого сервера и порт 80 доступен.${NC}"
+                systemctl start nginx
+                exit 1
+            fi
             systemctl start nginx
-            exit 1
+            log "${GREEN}SSL-сертификат получен.${NC}"
+        else
+            log "SSL-сертификат уже существует."
         fi
-        systemctl start nginx
-        log "${GREEN}SSL-сертификат получен.${NC}"
-    else
-        log "SSL-сертификат уже существует."
     fi
 
-    # Создание основного конфига Nginx с HTTPS и редиректом
+    # Создание основного конфига Nginx
     NGINX_CONF="/etc/nginx/sites-available/$DOMAIN"
-    cat > "$NGINX_CONF" <<EOF
+    if [[ "$NEED_SSL" == "y" ]]; then
+        cat > "$NGINX_CONF" <<EOF
 server {
     listen 80;
     listen [::]:80;
@@ -146,7 +241,6 @@ server {
         try_files \$uri \$uri/ =404;
     }
 
-    # Заглушка для отсутствующей обработки PHP (будет добавлена позже, если понадобится)
     location ~ \.php$ {
         return 404;
     }
@@ -154,11 +248,27 @@ server {
     server_tokens off;
 }
 EOF
+    else
+        cat > "$NGINX_CONF" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $DOMAIN;
+
+    root $SITE_DIR;
+    index index.html;
+
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+}
+EOF
+    fi
+
     ln -sf "$NGINX_CONF" "/etc/nginx/sites-enabled/"
     rm -f "/etc/nginx/sites-enabled/default"
     nginx -t >> "$LOG_FILE" 2>&1
     systemctl reload nginx
-
     log "${GREEN}Nginx настроен для домена $DOMAIN.${NC}"
 fi
 
@@ -186,7 +296,6 @@ fi
 # ----------------------------------------------------------------------
 next_step "Определение порта для fallback-сервера Nginx"
 
-# Проверяем, есть ли уже inbound на 443 (и извлекаем порт fallback)
 EXISTING_INBOUND=$(sqlite3 "$XUI_DB" "SELECT id, settings FROM inbounds WHERE port=443 AND enable=1 LIMIT 1;" 2>/dev/null || echo "")
 if [[ -n "$EXISTING_INBOUND" ]]; then
     INBOUND_ID=$(echo "$EXISTING_INBOUND" | cut -d'|' -f1)
@@ -214,7 +323,7 @@ add_to_env "NGINX_LOCAL_PORT" "$LOCAL_PORT"
 log_only "Используется локальный порт: $LOCAL_PORT"
 
 # ----------------------------------------------------------------------
-# Создание fallback-сервера Nginx (отдельный конфиг)
+# Создание fallback-сервера Nginx
 # ----------------------------------------------------------------------
 next_step "Настройка fallback-сервера Nginx на порт $LOCAL_PORT"
 
@@ -302,9 +411,14 @@ fi
 
 SSL_CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
 SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
-if ! $XUI_BIN setting -webCert "$SSL_CERT" -webKey "$SSL_KEY" >> "$LOG_FILE" 2>&1; then
-    log "${RED}Ошибка настройки SSL для панели.${NC}"
-    exit 1
+if [[ -f "$SSL_CERT" && -f "$SSL_KEY" ]]; then
+    if ! $XUI_BIN setting -webCert "$SSL_CERT" -webKey "$SSL_KEY" >> "$LOG_FILE" 2>&1; then
+        log "${RED}Ошибка настройки SSL для панели.${NC}"
+        exit 1
+    fi
+    log "HTTPS для панели включён."
+else
+    log "${YELLOW}SSL-сертификаты не найдены, панель будет работать по HTTP.${NC}"
 fi
 
 systemctl start x-ui
@@ -415,6 +529,9 @@ ufw reload >> "$LOG_FILE" 2>&1
 next_step "Завершение установки"
 
 PROTOCOL="https"
+if [[ ! -f "$SSL_CERT" ]]; then
+    PROTOCOL="http"
+fi
 PANEL_URL="${PROTOCOL}://${DOMAIN}:${XUI_PORT}${XUI_PATH}"
 
 echo ""
