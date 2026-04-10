@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 6.0 (полностью совместим с lib.sh, автоматическая установка)
+# Версия: 6.1 (исправлена установка 3X-UI с таймаутом)
 # =====================================================================
 
 set -euo pipefail
@@ -133,18 +133,26 @@ systemctl stop nginx
 log_only "Nginx остановлен."
 
 # ----------------------------------------------------------------------
-# 2. Установка 3X-UI (если не установлен)
+# 2. Установка 3X-UI (с таймаутом)
 # ----------------------------------------------------------------------
 next_step "Установка 3X-UI (может занять 1-2 минуты)"
 if systemctl list-units --full --all | grep -q "x-ui.service"; then
     log "${GREEN}3X-UI уже установлен.${NC}"
 else
+    log "${YELLOW}Установка 3X-UI...${NC}"
     INSTALL_SCRIPT="/tmp/install_3xui.sh"
     if curl -fsSL --connect-timeout 10 --max-time 30 https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh -o "$INSTALL_SCRIPT"; then
         chmod +x "$INSTALL_SCRIPT"
-        yes | bash "$INSTALL_SCRIPT" >> "$LOG_FILE" 2>&1
+        # Запускаем скрипт с таймаутом 300 секунд, отключая интерактивность
+        timeout 300 bash "$INSTALL_SCRIPT" </dev/null >> "$LOG_FILE" 2>&1
+        local exit_code=$?
         rm -f "$INSTALL_SCRIPT"
-        log "${GREEN}3X-UI установлен.${NC}"
+        if [[ $exit_code -eq 0 ]]; then
+            log "${GREEN}3X-UI установлен.${NC}"
+        else
+            log "${RED}Ошибка установки 3X-UI (код $exit_code).${NC}"
+            exit 1
+        fi
     else
         log "${RED}Не удалось загрузить скрипт установки 3X-UI.${NC}"
         exit 1
