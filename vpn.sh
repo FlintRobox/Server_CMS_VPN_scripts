@@ -393,7 +393,7 @@ else
 fi
 
 # ----------------------------------------------------------------------
-# Настройка панели 3X-UI
+# Настройка панели 3X-UI (через прямое редактирование БД)
 # ----------------------------------------------------------------------
 next_step "Настройка параметров панели 3X-UI"
 
@@ -414,22 +414,31 @@ if [[ -z "${XUI_PASSWORD:-}" ]]; then
     add_to_env "XUI_PASSWORD" "$XUI_PASSWORD"
 fi
 
+# Останавливаем панель для безопасного редактирования БД
 systemctl stop x-ui
 
-if ! $XUI_BIN setting -port "$XUI_PORT" -path "$XUI_PATH" -username "$XUI_USERNAME" -password "$XUI_PASSWORD" >> "$LOG_FILE" 2>&1; then
-    log "${RED}Ошибка применения настроек панели.${NC}"
-    exit 1
-fi
+# Убедимся, что таблица settings существует
+sqlite3 "$XUI_DB" "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);" 2>/dev/null || true
+
+# Применяем настройки через SQLite
+sqlite3 "$XUI_DB" <<EOF
+INSERT OR REPLACE INTO settings (key, value) VALUES ('webPort', '$XUI_PORT');
+INSERT OR REPLACE INTO settings (key, value) VALUES ('webBasePath', '$XUI_PATH');
+INSERT OR REPLACE INTO settings (key, value) VALUES ('username', '$XUI_USERNAME');
+INSERT OR REPLACE INTO settings (key, value) VALUES ('password', '$XUI_PASSWORD');
+EOF
 
 SSL_CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
 SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
 if [[ -f "$SSL_CERT" && -f "$SSL_KEY" ]]; then
-    if ! $XUI_BIN setting -webCert "$SSL_CERT" -webKey "$SSL_KEY" >> "$LOG_FILE" 2>&1; then
-        log "${RED}Ошибка настройки SSL для панели.${NC}"
-        exit 1
-    fi
+    sqlite3 "$XUI_DB" <<EOF
+INSERT OR REPLACE INTO settings (key, value) VALUES ('webCertFile', '$SSL_CERT');
+INSERT OR REPLACE INTO settings (key, value) VALUES ('webKeyFile', '$SSL_KEY');
+INSERT OR REPLACE INTO settings (key, value) VALUES ('webEnable', 'true');
+EOF
     log "HTTPS для панели включён."
 else
+    sqlite3 "$XUI_DB" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webEnable', 'false');"
     log "${YELLOW}SSL-сертификаты не найдены, панель будет работать по HTTP.${NC}"
 fi
 
