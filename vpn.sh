@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 8.1 (добавлен выбор SSL в автономном режиме)
+# Версия: 8.2 (финальная, исправлены ошибки установки и конфигурации)
 # =====================================================================
 
 set -euo pipefail
@@ -323,15 +323,47 @@ add_to_env "NGINX_LOCAL_PORT" "$LOCAL_PORT"
 log_only "Используется локальный порт: $LOCAL_PORT"
 
 # ----------------------------------------------------------------------
-# Создание fallback-сервера Nginx
+# Настройка Nginx в зависимости от режима
 # ----------------------------------------------------------------------
-next_step "Настройка fallback-сервера Nginx на порт $LOCAL_PORT"
+if [[ "$MODE" == "integrated" ]]; then
+    next_step "Перенос Nginx на локальный порт $LOCAL_PORT и освобождение 443"
+    systemctl stop nginx
+    cat > "/etc/nginx/sites-available/$DOMAIN" <<EOF
+server {
+    listen 127.0.0.1:$LOCAL_PORT;
+    server_name $DOMAIN;
+    root $SITE_DIR;
+    index index.php index.html;
 
-FALLBACK_CONF="/etc/nginx/sites-available/${DOMAIN}-fallback"
-FALLBACK_ENABLED="/etc/nginx/sites-enabled/${DOMAIN}-fallback"
-rm -f "$FALLBACK_ENABLED"
+    access_log /var/log/nginx/${DOMAIN}_access.log;
+    error_log /var/log/nginx/${DOMAIN}_error.log;
 
-cat > "$FALLBACK_CONF" <<EOF
+    location / {
+        try_files \$uri \$uri/ /index.php?\$args;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:$PHP_SOCKET;
+    }
+
+    location ^~ /uploads {
+        location ~ \.php$ { deny all; }
+    }
+
+    server_tokens off;
+}
+EOF
+    nginx -t >> "$LOG_FILE" 2>&1
+    systemctl start nginx
+    log "${GREEN}Nginx перенесён на локальный порт $LOCAL_PORT. Порт 443 освобождён.${NC}"
+else
+    next_step "Создание fallback-сервера Nginx на порт $LOCAL_PORT"
+    FALLBACK_CONF="/etc/nginx/sites-available/${DOMAIN}-fallback"
+    FALLBACK_ENABLED="/etc/nginx/sites-enabled/${DOMAIN}-fallback"
+    rm -f "$FALLBACK_ENABLED"
+
+    cat > "$FALLBACK_CONF" <<EOF
 server {
     listen 127.0.0.1:$LOCAL_PORT;
     server_name $DOMAIN;
@@ -343,27 +375,26 @@ server {
     }
 
 EOF
-
-if [[ -n "$PHP_SOCKET" ]]; then
-    cat >> "$FALLBACK_CONF" <<EOF
+    if [[ -n "$PHP_SOCKET" ]]; then
+        cat >> "$FALLBACK_CONF" <<EOF
     location ~ \.php$ {
         include snippets/fastcgi-php.conf;
         fastcgi_pass unix:$PHP_SOCKET;
     }
 EOF
-fi
-
-cat >> "$FALLBACK_CONF" <<EOF
+    fi
+    cat >> "$FALLBACK_CONF" <<EOF
     location ^~ /uploads {
         location ~ \.php$ { deny all; }
     }
 }
 EOF
 
-ln -sf "$FALLBACK_CONF" "$FALLBACK_ENABLED"
-nginx -t >> "$LOG_FILE" 2>&1
-systemctl reload nginx
-log "${GREEN}Fallback-сервер добавлен.${NC}"
+    ln -sf "$FALLBACK_CONF" "$FALLBACK_ENABLED"
+    nginx -t >> "$LOG_FILE" 2>&1
+    systemctl reload nginx
+    log "${GREEN}Fallback-сервер добавлен.${NC}"
+fi
 
 # ----------------------------------------------------------------------
 # Установка 3X-UI
@@ -376,7 +407,6 @@ else
     INSTALL_SCRIPT="/tmp/install_3xui.sh"
     if curl -fsSL --connect-timeout 10 --max-time 30 https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh -o "$INSTALL_SCRIPT"; then
         chmod +x "$INSTALL_SCRIPT"
-        # Передаём два 'y' для автоматического подтверждения (установка и настройка)
         printf 'y\ny\n' | bash "$INSTALL_SCRIPT" >> "$LOG_FILE" 2>&1
         install_result=$?
         rm -f "$INSTALL_SCRIPT"
@@ -414,13 +444,10 @@ if [[ -z "${XUI_PASSWORD:-}" ]]; then
     add_to_env "XUI_PASSWORD" "$XUI_PASSWORD"
 fi
 
-# Останавливаем панель для безопасного редактирования БД
 systemctl stop x-ui
 
-# Убедимся, что таблица settings существует
 sqlite3 "$XUI_DB" "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);" 2>/dev/null || true
 
-# Применяем настройки через SQLite
 sqlite3 "$XUI_DB" <<EOF
 INSERT OR REPLACE INTO settings (key, value) VALUES ('webPort', '$XUI_PORT');
 INSERT OR REPLACE INTO settings (key, value) VALUES ('webBasePath', '$XUI_PATH');
@@ -476,9 +503,6 @@ sqlite3 "$XUI_DB" "CREATE TABLE IF NOT EXISTS inbounds (
 if [[ -n "$EXISTING_INBOUND" ]] && [[ "$FORCE_MODE" == false ]]; then
     log "${YELLOW}Inbound на порту 443 уже существует (ID: $INBOUND_ID). Пропуск.${NC}"
     CLIENT_UUID=$(echo "$EXISTING_INBOUND" | cut -d'|' -f2 | jq -r '.clients[0].id' 2>/dev/null || echo "")
-    # Важно: перезапустим x-ui, чтобы убедиться, что inbound активен
-    systemctl restart x-ui
-    sleep 3
 else
     if [[ -n "$EXISTING_INBOUND" ]]; then
         log "${YELLOW}Удаление существующего inbound на порту 443...${NC}"
@@ -516,8 +540,6 @@ VALUES (1, 0, 0, 0, 'VLESS+TLS', 1, 0, '', 443, 'vless', '$SETTINGS_JSON', '$STR
 EOF
     log "${GREEN}Inbound создан, UUID клиента: $CLIENT_UUID${NC}"
     add_to_env "CLIENT_UUID" "$CLIENT_UUID"
-    systemctl restart x-ui
-    sleep 5
 fi
 
 # ----------------------------------------------------------------------
@@ -525,15 +547,14 @@ fi
 # ----------------------------------------------------------------------
 next_step "Перезапуск Xray и проверка"
 
-# Убедимся, что служба запущена
+systemctl restart x-ui
+sleep 5
+
 if ! systemctl is-active --quiet x-ui; then
     log "${YELLOW}Служба x-ui не активна, пытаемся запустить...${NC}"
     systemctl start x-ui
     sleep 5
 fi
-
-# Дадим Xray время на инициализацию
-sleep 5
 
 if ! ss -tlnp | grep -q ':443.*xray\|:443.*x-ui'; then
     log "${RED}Ошибка: порт 443 не прослушивается Xray.${NC}"
