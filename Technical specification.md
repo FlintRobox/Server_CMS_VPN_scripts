@@ -88,7 +88,7 @@ source "$SCRIPT_DIR/lib.sh"
 - Чистая установка Ubuntu 24.04 (или Debian 12) с доступом в интернет.
 - Скрипт запускается от root.
 
-### 2.3. Полная последовательность действий
+### 2.3. Последовательность действий
 
 #### 2.3.1. Проверка прав и наличие `lib.sh`
 Скрипт проверяет, что он выполняется с правами суперпользователя (root). Если нет – выводит сообщение об ошибке и завершается. Также проверяет наличие `lib.sh` в своей директории. Создаётся или очищается лог-файл `/var/log/setup.log`. В лог записывается строка о начале выполнения скрипта.
@@ -160,9 +160,132 @@ source "$SCRIPT_DIR/lib.sh"
 - Выполнен `init.sh` (установлен веб-стек).
 - Скрипт запускается от root.
 
-### 3.3. Полная последовательность действий
+### 3.3. Последовательность действий
 
-(Содержание секции 3 остаётся без изменений, как в версии 12.1)
+### 3.3. Последовательность действий
+
+#### 3.3.1. Проверка окружения и загрузка `.env`
+Скрипт подключает `lib.sh`, проверяет наличие файла. Загружает `.env`. Если переменная `DOMAIN` отсутствует, она запрашивается у пользователя (с валидацией доменного имени). Если отсутствует `ADMIN_EMAIL`, также запрашивается (с валидацией email). Все введённые значения сохраняются в `.env` с использованием функции `add_to_env` (которая обновляет существующие записи, избегая дублирования).
+
+#### 3.3.2. Выбор типа SSL-сертификата и конфигурация
+Скрипт запрашивает у пользователя: использовать новый сертификат Let’s Encrypt или уже существующий из локальной папки.
+
+**Для Let’s Encrypt:** дополнительно запрашивается `ADMIN_EMAIL` (если ещё не задан). В дальнейшем `certbot` получит сертификат автоматически.
+
+**Для существующего сертификата:** скрипт запрашивает путь к папке, где лежат файлы:
+- Файл с расширением `.key` (приватный ключ).
+- Файл с расширением `.crt` или `.cer` (сертификат домена).
+- Опционально – файл CA-цепочки (`ca.crt`, `ca.cer` или любой файл, содержащий промежуточные сертификаты).
+
+Скрипт проверяет наличие этих файлов. Если какой-то обязательный файл не найден – выводится ошибка с просьбой указать корректный путь. Далее:
+- Создаётся директория `/etc/letsencrypt/live/${DOMAIN}/` (если не существует).
+- Файл сертификата домена и CA-цепочка (если есть) объединяются в `fullchain.pem` (сначала сертификат домена, затем CA-цепочка). Если CA-цепочки нет, `fullchain.pem` становится копией сертификата домена.
+- Приватный ключ копируется в `privkey.pem`.
+- Устанавливаются права: `fullchain.pem` – 644, `privkey.pem` – 600.
+- В `.env` сохраняются `SSL_TYPE=existing`, `SSL_CERT_PATH=/etc/letsencrypt/live/${DOMAIN}/fullchain.pem`, `SSL_KEY_PATH=/etc/letsencrypt/live/${DOMAIN}/privkey.pem`.
+
+#### 3.3.3. Создание корневой директории сайта
+Создаётся директория `/var/www/${DOMAIN}` (если не существует). Внутри неё создаются поддиректории: `core`, `admin`, `templates`, `uploads`. Для `uploads` устанавливаются права 750 и владелец `www-data`.
+
+#### 3.3.4. Создание `config.php`
+Создаётся файл `/var/www/${DOMAIN}/config.php` (если его нет). Шаблон содержит константы `SITE_NAME` (значение по умолчанию «Мой сайт»), `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASS`, `DEBUG_MODE`. Также в шаблоне реализована автозагрузка классов из папки `core` и инициализация PDO-соединения с сохранением объекта в константу `DB_CONNECTION` и глобальную переменную `$pdo`.
+
+#### 3.3.5. Создание базы данных и пользователя
+Скрипт подключается к MariaDB (с использованием `/root/.my.cnf` для root-доступа). Выполняются запросы:
+- `CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`
+- `CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';`
+- `GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';`
+- `FLUSH PRIVILEGES;`
+
+Если переменные `DB_NAME`, `DB_USER`, `DB_PASSWORD` не были заданы в `.env`, они генерируются:
+- `DB_NAME` = преобразование домена (точки заменяются на подчёркивания).
+- `DB_USER` = `user_${DB_NAME}`.
+- `DB_PASSWORD` = случайная строка (20 символов, буквы и цифры).
+Сгенерированные значения сохраняются в `.env`.
+
+#### 3.3.6. Создание таблиц базы данных (CMS и AI)
+Скрипт выполняет SQL-запросы с конструкцией `CREATE TABLE IF NOT EXISTS` для всех необходимых таблиц:
+- `users` – id, login, password_hash, role, email, created_at.
+- `pages` – id, slug, title, content, meta_description, status, template, created_at, updated_at.
+- `settings` – key (PRIMARY KEY), value.
+- `visits` – id, visit_date, visitor_ip, user_agent, page_url, created_at, INDEX(visit_date).
+- `server_stats` – id, recorded_at, load_1min, load_5min, load_15min, memory_total, memory_used, disk_total, disk_used, INDEX(recorded_at).
+- `sessions` – session_id (PRIMARY KEY), data, last_updated.
+- `files` – id, original_name, path, size, type, uploaded_at, uploaded_by (FOREIGN KEY to users.id).
+- `ai_requests` – id, prompt, response, created_at, user_id (FOREIGN KEY to users.id).
+
+Если таблица `users` пуста, добавляется запись администратора: логин `admin`, пароль из переменной `ADMIN_PASSWORD` (хэшируется с помощью `password_hash`), роль `admin`, email из `ADMIN_EMAIL`. Если `ADMIN_PASSWORD` не задан, генерируется случайный пароль и сохраняется в `.env`.
+
+#### 3.3.7. Создание языковых файлов (RU/EN)
+В директории `/var/www/${DOMAIN}/admin/locale/` создаются файлы `ru.php` и `en.php`. Каждый файл возвращает ассоциативный массив с переводами для всех ключей, используемых в админ-панели (более 80 ключей, включая `dashboard`, `users`, `content`, `files`, `server_stats`, `visitors`, `settings`, `logout`, `login`, `invalid_credentials`, `cpu_load`, `ram_usage`, `disk_usage`, `pages_count`, `visits_last_7_days`, `last_visits`, `time`, `ip`, `page`, `user_agent`, `total_visits`, `unique_ips`, `filter`, `reset`, `save`, `delete`, `edit`, `add`, `new_page`, `title`, `slug`, `content`, `meta_description`, `status`, `draft`, `published`, `template`, `source`, `database`, `file_system`, `upload_file`, `original_name`, `size`, `type`, `uploaded_at`, `site_name`, `admin_email`, `admin_theme`, `light`, `dark`, `stats_retention`, `admin_lang`, `search`, `created_at`, `actions`, `file`, `import_to_db`, `slug_auto`, `cancel`, `preview`, `back`, `title_required`, `slug_exists`, `page_created`, `page_saved`, `edit_page`, `edit_file`, `code_warning`, `editing`, `file_not_found`, `file_saved`, `file_not_writable`, `error`, `path`, `confirm_delete`, `file_uploaded`, `file_deleted`, `select_file`, `upload`, `from`, `to`, `user_added`, `user_deleted`, `existing_users`, `role`, `add_user`, `password`, `editor`, `viewer`, `settings_saved`, `visits`, `analytics`, `inject_tracker`, `select_files`, `tracker_added`, `tracker_removed`, `manual_instruction`, `manual_text_php`, `manual_text_html`, `manual_note`, `ai_generator`, `ai_history`).
+
+#### 3.3.8. Создание файлов административной панели
+С использованием функции `create_php_file` (которая читает содержимое из stdin через heredoc) создаются следующие PHP-файлы:
+
+- **`admin/includes/functions.php`** – функция `getSetting()`, `__()` для локализации, `currentLanguage()`, `setLanguage()`.
+- **`admin/includes/auth.php`** – функции `isLoggedIn()`, `requireLogin()`, `isAdmin()`, `requireAdmin()`, `currentUser()`.
+- **`admin/login.php`** – форма входа, обработка POST-запроса, переключение языка.
+- **`admin/logout.php`** – уничтожение сессии и редирект.
+- **`admin/includes/header.php`** – шапка админки с именем пользователя и переключателем языка.
+- **`admin/includes/sidebar.php`** – боковое меню (дашборд, пользователи, контент, файлы, статистика, посетители, аналитика, AI генератор, AI история, настройки, выход).
+- **`admin/index.php`** – дашборд: карточки с загрузкой CPU, RAM, диска, количеством страниц; график посещаемости за 7 дней; таблица последних 5 посещений.
+- **`admin/api/visits_last_7.php`** – возвращает JSON с датами и количеством посещений за последние 7 дней.
+- **`admin/api/server_stats.php`** – возвращает JSON с метриками сервера (CPU, RAM, диск) за последние N часов.
+- **`admin/stats.php`** – страница с графиками загрузки CPU, RAM, диска.
+- **`admin/visitors.php`** – таблица посещений с фильтрами по дате и IP.
+- **`admin/settings.php`** – страница настроек: название сайта, email администратора, тема, срок хранения статистики, язык админки, а также блок настроек DeepSeek (API ключ, модель, max tokens).
+- **`admin/users.php`** – управление пользователями (доступно только администратору).
+- **`admin/includes/content_functions.php`** – вспомогательные функции для управления контентом.
+- **`admin/content.php`** – список страниц (из БД и из файловой системы) с возможностью поиска, сортировки, редактирования, удаления.
+- **`admin/edit_page.php`** – форма создания/редактирования страницы (с TinyMCE и кнопкой AI).
+- **`admin/delete_page.php`** – удаление страницы.
+- **`admin/edit_file.php`** – редактирование статических файлов (с поддержкой TinyMCE и AI).
+- **`admin/upload.php`** – обработка загрузки файлов (проверка MIME, размера, сохранение, запись в БД).
+- **`admin/files.php`** – управление загруженными файлами (список, поиск, сортировка, удаление, загрузка новых).
+- **`admin/file-list.php`** – возвращает JSON со списком файлов для `file_picker_callback`.
+- **`admin/file-picker.html`** – всплывающее окно для выбора ранее загруженного файла.
+- **`admin/analytics.php`** – автоматическое внедрение трекера в HTML/PHP-файлы, ручные инструкции.
+- **`admin/ai_generator.php`** – страница генерации контента через DeepSeek API (форма с промптом, отображение результата, кнопки «Создать страницу» и «Вставить в редактор»).
+- **`admin/ai_history.php`** – история запросов к AI (пагинация, модальные окна).
+- **`admin/ai_api.php`** – эндпоинт для AJAX-запросов из редактора TinyMCE.
+- **`admin/js/ai_tinymce_plugin.js`** – плагин TinyMCE для кнопки AI.
+
+#### 3.3.9. Создание CSS-файла
+Создаётся `/var/www/${DOMAIN}/admin/css/admin.css` с полным набором стилей для админ-панели: тёмная и светлая темы, оформление карточек, таблиц, кнопок, анимации.
+
+#### 3.3.10. Установка TinyMCE
+Скрипт проверяет наличие команды `npm`. Если `npm` отсутствует, скрипт автоматически устанавливает Node.js и npm через системный пакетный менеджер. Затем в временной директории выполняется `npm install tinymce@6.8.3 --production`. После установки файлы копируются в `/var/www/${DOMAIN}/admin/tinymce/`.
+
+#### 3.3.11. Создание роутера `cms-router.php`
+Создаётся файл `/var/www/${DOMAIN}/cms-router.php` – единая точка входа для фронтенда. Алгоритм:
+- Извлечь slug из URL (если пусто – `index`).
+- Выполнить запрос к таблице `pages` с условием `slug = ? AND status = 'published'`.
+- Если страница найдена – подключить шаблон из папки `templates` (по умолчанию `default.php`) и передать в него переменную `$page`.
+- Если страница не найдена – проверить существование статического файла (`.html` или другого). Если файл существует – отдать его с правильным Content-Type.
+- Если ничего не найдено – вернуть 404.
+
+#### 3.3.12. Интеграция трекера посещений
+- Создаётся эндпоинт `/track.php` для JS-трекера (если его нет).
+- Создаётся файл `/js/tracker.js`.
+- Если существует `index.php` – в него вставляется PHP-трекер (после первого `<?php`). Если `index.php` отсутствует, но есть `index.html` – в `index.html` вставляется `<script src="/js/tracker.js"></script>` перед `</body>` (с созданием резервной копии). Если нет ни того, ни другого – создаётся новый `index.php` с трекером и вызовом роутера.
+
+#### 3.3.13. Создание шаблона по умолчанию
+Создаётся файл `/var/www/${DOMAIN}/templates/default.php` – базовый HTML-шаблон для отображения страниц из БД. Шаблон подключает `config.php`, выводит заголовок, мета-описание, содержимое страницы, а также использует функцию `getSetting()` для получения названия сайта.
+
+#### 3.3.14. Настройка виртуального хоста Nginx и SSL
+Создаётся конфигурация `/etc/nginx/sites-available/${DOMAIN}`:
+- Если выбран Let’s Encrypt – сначала создаётся временная конфигурация на порту 80, запускается `certbot`, после чего конфигурация обновляется (добавляется блок для HTTPS с редиректом).
+- Если выбран существующий сертификат – сразу создаётся конфигурация с HTTPS (прослушивание портов 80 и 443, редирект с HTTP на HTTPS, указание путей к сертификатам).
+- Активация сайта (симлинк в `sites-enabled`), проверка конфигурации, перезапуск Nginx.
+
+#### 3.3.15. Настройка cron для сбора метрик сервера
+Создаётся скрипт `/usr/local/bin/collect_server_stats.sh`, который каждые 5 минут собирает load average, память, диск и вставляет в `server_stats`, а также удаляет старые записи согласно `stats_retention`. Добавляется задание в `/etc/crontab`.
+
+#### 3.3.16. Установка прав доступа
+Все файлы в `/var/www/${DOMAIN}` получают владельца `www-data:www-data`. Директориям устанавливаются права 755, файлам – 644. Директория `uploads` получает права 750. Файл `.env` получает права 600.
+
+#### 3.3.17. Перезапуск служб и завершение
+Выполняется перезапуск PHP-FPM и Nginx. Выводится итоговая информация: URL сайта, админ-панели, логин и пароль администратора, параметры AI, инструкции по размещению готовых файлов сайта и внедрению аналитики.
 
 ---
 
@@ -181,7 +304,7 @@ source "$SCRIPT_DIR/lib.sh"
 - Для интеграционного режима – выполнен `cms.sh` (настроен домен, получен SSL-сертификат).
 - Для автономного режима – домен должен быть делегирован на IP сервера.
 
-### 4.3. Полная последовательность действий
+### 4.3. Последовательность действий
 
 #### 4.3.1. Определение режима работы
 Скрипт проверяет наличие конфигурационного файла Nginx для домена `${DOMAIN}` и директории `/var/www/${DOMAIN}`. Если оба существуют – активируется **интеграционный режим**, иначе **автономный**.
